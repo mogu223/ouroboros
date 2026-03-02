@@ -12,7 +12,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 6.2.1 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+**Version:** 6.2.2 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
 ---
 
@@ -225,6 +225,9 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v6.2.2 -- Shanghai Timezone
+- **Timezone change** -- Default timezone set to Shanghai (UTC+8) in utils.py. All timestamps now display in Asia/Shanghai timezone instead of UTC.
 
 ### v6.2.1 -- Model Restructuring
 - **Model cleanup** -- Removed all models except qwen3.5-plus, kimi-k2.5, glm-5, MiniMax-M2.5.
