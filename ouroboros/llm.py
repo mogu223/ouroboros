@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import logging
 import os
+
+# VPS/OpenAI-compatible gateway support
+OUROBOROS_API_BASE_URL = os.environ.get("OUROBOROS_API_BASE_URL", "").strip()
+OUROBOROS_API_KEY = os.environ.get("OUROBOROS_API_KEY", "").strip()
+
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -108,9 +113,9 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = (OUROBOROS_API_BASE_URL or "https://openrouter.ai/api/v1"),
     ):
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        self._api_key = api_key or (OUROBOROS_API_KEY or os.environ.get("OPENROUTER_API_KEY", ""))
         self._base_url = base_url
         self._client = None
 
@@ -120,10 +125,12 @@ class LLMClient:
             self._client = OpenAI(
                 base_url=self._base_url,
                 api_key=self._api_key,
-                default_headers={
-                    "HTTP-Referer": "https://colab.research.google.com/",
-                    "X-Title": "Ouroboros",
-                },
+                default_headers=(
+                    {
+                        "HTTP-Referer": "https://colab.research.google.com/",
+                        "X-Title": "Ouroboros",
+                    } if "openrouter.ai" in str(self._base_url) else None
+                ),
             )
         return self._client
 
@@ -164,12 +171,14 @@ class LLMClient:
         client = self._get_client()
         effort = normalize_reasoning_effort(reasoning_effort)
 
-        extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
-        }
+        extra_body: Dict[str, Any] = {}
+        if "openrouter.ai" in str(self._base_url):
+            extra_body = {
+                "reasoning": {"effort": effort, "exclude": True},
+            }
 
         # Pin Anthropic models to Anthropic provider for prompt caching
-        if model.startswith("anthropic/"):
+        if ("openrouter.ai" in str(self._base_url)) and model.startswith("anthropic/"):
             extra_body["provider"] = {
                 "order": ["Anthropic"],
                 "allow_fallbacks": False,
@@ -180,7 +189,7 @@ class LLMClient:
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "extra_body": extra_body,
+            **({"extra_body": extra_body} if extra_body else {}),
         }
         if tools:
             # Add cache_control to last tool for Anthropic prompt caching
