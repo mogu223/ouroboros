@@ -554,6 +554,7 @@ while True:
             continue
 
         log_chat("in", chat_id, user_id, text)
+        TG.send_chat_action(chat_id, "typing")
         st["last_owner_message_at"] = now_iso
         _last_message_ts = time.time()
         save_state(st)
