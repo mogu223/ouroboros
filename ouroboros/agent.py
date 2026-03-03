@@ -31,7 +31,7 @@ from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
-from ouroboros.loop import run_llm_loop
+from ouroboros.loop import run_tool_loop
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +412,7 @@ class OuroborosAgent:
                 initial_effort = "medium"
 
             try:
-                text, usage, llm_trace = run_llm_loop(
+                text, usage, llm_trace = run_tool_loop(
                     messages=messages,
                     tools=self.tools,
                     llm=self.llm,
