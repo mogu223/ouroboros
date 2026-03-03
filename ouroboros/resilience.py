@@ -132,6 +132,25 @@ class CircuitBreaker:
         """Filter to only available models."""
         return [m for m in models if self.is_available(m)]
     
+    def select_fallback(self, active_model: str, candidates: List[str]) -> Optional[str]:
+        """
+        Select a fallback model from candidates.
+        
+        Args:
+            active_model: Currently active (failing) model
+            candidates: List of fallback candidates
+            
+        Returns:
+            First available model from candidates, or None if all unavailable
+        """
+        for model in candidates:
+            if model == active_model:
+                continue  # Skip the failing model
+            if self.is_available(model):
+                log.info(f"CircuitBreaker: selecting fallback {model} (was {active_model})")
+                return model
+        return None
+    
     def get_status(self) -> Dict:
         """Get current status of all models."""
         with self.global_lock:
