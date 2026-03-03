@@ -300,7 +300,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
         )
         return False, msg
 
-    pass # bypassed], cwd=str(REPO_DIR), check=True)
+    subprocess.run(["git", "checkout", branch, "--"], cwd=str(REPO_DIR), check=True)
     subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=str(REPO_DIR), check=True)
     # Clean __pycache__ to prevent stale bytecode (git checkout may not update mtime)
     for p in REPO_DIR.rglob("__pycache__"):
@@ -383,7 +383,7 @@ def safe_restart(
         - If failed: (False, "<error description>")
     """
     # Try dev branch
-    ok, err = True, "" # bypassed checkout(BRANCH_DEV, reason=reason, unsynced_policy=unsynced_policy)
+    ok, err = checkout_and_reset(BRANCH_DEV, reason=reason, unsynced_policy=unsynced_policy)
     if not ok:
         return False, f"Failed checkout {BRANCH_DEV}: {err}"
 
