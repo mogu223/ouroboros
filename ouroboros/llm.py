@@ -177,7 +177,7 @@ class LLMClient:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
         client = self._get_client()
-        effort = normalize_reasoning_effort(reasoning_effort)
+        effort = normalize_reasoning_effort(effort)
 
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": True},
@@ -287,7 +287,7 @@ class LLMClient:
             messages=messages,
             model=model,
             tools=None,
-            effort=reasoning_effort,
+            effort=effort,
             max_tokens=max_tokens,
         )
         text = response_msg.get("content") or ""
