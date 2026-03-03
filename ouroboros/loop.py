@@ -882,7 +882,7 @@ def run_tool_loop(
                 all_errors = []
                 for fallback_model in fallback_candidates:
                     # Skip if this model is currently blocked by circuit breaker
-                    if cb.is_blocked(fallback_model):
+                    if not cb.is_available(fallback_model):
                         log.info("Skipping blocked fallback model: %s", fallback_model)
                         continue
                     
