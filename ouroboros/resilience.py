@@ -338,7 +338,7 @@ class IterationGuardian:
     
     def should_abort(self) -> bool:
         """Check if we should abort due to depth."""
-        return self.get_depth() > self.max_depth
+        return self.get_depth() > self.max_depth\n\n    def should_stop(self, round_idx: int, task_type: str) -> bool:\n        return round_idx >= 200
 
 
 # Global accessors
