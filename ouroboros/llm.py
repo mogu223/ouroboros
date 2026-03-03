@@ -1,8 +1,14 @@
 """
 Ouroboros — LLM client.
 
-The only module that communicates with the LLM API (OpenRouter).
+The only module that communicates with the LLM API (OpenRouter/CLIProxyAPI).
 Contract: chat(), default_model(), available_models(), add_usage().
+
+Optimized for CLIProxyAPI compatibility:
+- Handles reasoning_content from thinking models (Qwen3)
+- Supports model aliases
+- Local cost estimation when API doesn't return pricing
+- Disables thinking mode by default for stability
 """
 
 from __future__ import annotations
@@ -25,6 +31,40 @@ log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "glm-5"
 
+# CLIProxyAPI model aliases mapping (alias -> canonical name)
+# Used for pricing lookup and model identification
+MODEL_ALIASES = {
+    "kimi-k2": "moonshotai/kimi-k2:free",
+    "kimi-k2.5": "moonshotai/kimi-k2.5",
+    "qwen3.5-plus": "qwen/qwen3.5-plus",
+    "glm-5": "zhipu/glm-5",
+    "MiniMax-M2.5": "minimax/MiniMax-M2.5",
+    "gemini-2.5-flash-lite": "google/gemini-2.5-flash-lite",
+}
+
+# Models known to use "thinking" mode by default (Qwen3 series, etc.)
+# These may return content in reasoning_content instead of content
+THINKING_MODELS = frozenset({
+    "qwen3", "qwen3.5", "qwen3-235b", "qwen3.5-plus", "qwen3.5-turbo",
+    "deepseek-r1", "deepseek-v3",
+})
+
+# Pricing for local cost estimation (input_per_1m, cached_per_1m, output_per_1m)
+# Used when API doesn't return cost (CLIProxyAPI case)
+LOCAL_PRICING = {
+    "glm-5": (1.25, 0.125, 10.0),
+    "qwen3.5-plus": (0.40, 0.04, 2.40),
+    "kimi-k2.5": (0.50, 0.05, 3.0),
+    "MiniMax-M2.5": (0.60, 0.06, 3.5),
+    "gemini-2.5-flash-lite": (0.10, 0.01, 0.50),
+    # Canonical names
+    "qwen/qwen3.5-plus": (0.40, 0.04, 2.40),
+    "moonshotai/kimi-k2.5": (0.50, 0.05, 3.0),
+    "zhipu/glm-5": (1.25, 0.125, 10.0),
+    "minimax/MiniMax-M2.5": (0.60, 0.06, 3.5),
+    "google/gemini-2.5-flash-lite": (0.10, 0.01, 0.50),
+}
+
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
     allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
@@ -43,6 +83,55 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
         total[k] = int(total.get(k) or 0) + int(usage.get(k) or 0)
     if usage.get("cost"):
         total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
+
+
+def resolve_model_alias(model: str) -> str:
+    """
+    Resolve model alias to canonical name.
+    Returns original model if not an alias.
+    """
+    return MODEL_ALIASES.get(model, model)
+
+
+def is_thinking_model(model: str) -> bool:
+    """Check if model is known to use thinking mode by default."""
+    model_lower = model.lower()
+    return any(tm in model_lower for tm in THINKING_MODELS)
+
+
+def estimate_cost_local(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cached_tokens: int = 0,
+) -> float:
+    """
+    Estimate cost using local pricing table.
+    Returns 0.0 if model not found.
+    """
+    # Try exact match first
+    pricing = LOCAL_PRICING.get(model)
+    if not pricing:
+        # Try alias resolution
+        canonical = resolve_model_alias(model)
+        pricing = LOCAL_PRICING.get(canonical)
+    if not pricing:
+        # Try prefix match
+        for key, val in LOCAL_PRICING.items():
+            if model.lower().startswith(key.lower()) or key.lower().startswith(model.lower()):
+                pricing = val
+                break
+    if not pricing:
+        return 0.0
+    
+    input_price, cached_price, output_price = pricing
+    regular_input = max(0, prompt_tokens - cached_tokens)
+    cost = (
+        regular_input * input_price / 1_000_000
+        + cached_tokens * cached_price / 1_000_000
+        + completion_tokens * output_price / 1_000_000
+    )
+    return round(cost, 6)
 
 
 def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
@@ -112,7 +201,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, float, float]]:
 
 
 class LLMClient:
-    """OpenRouter API wrapper. All LLM calls go through this class."""
+    """OpenRouter/CLIProxyAPI wrapper. All LLM calls go through this class."""
 
     def __init__(
         self,
@@ -128,6 +217,8 @@ class LLMClient:
         self._api_key = api_key or get_openrouter_api_key() or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = get_openai_base_url() or os.environ.get("OPENAI_BASE_URL", base_url)
         self._client = None
+        # Detect if we're using CLIProxyAPI (not OpenRouter directly)
+        self._is_cliproxy = "8317" in self._base_url or "cliproxy" in self._base_url.lower()
 
     def _get_client(self):
         if self._client is None:
@@ -144,6 +235,9 @@ class LLMClient:
 
     def _fetch_generation_cost(self, generation_id: str) -> Optional[float]:
         """Fetch cost from OpenRouter Generation API as fallback."""
+        # Skip if using CLIProxyAPI (doesn't support this endpoint)
+        if self._is_cliproxy:
+            return None
         try:
             import requests
             url = f"{self._base_url.rstrip('/')}/generation?id={generation_id}"
@@ -175,28 +269,49 @@ class LLMClient:
         max_tokens: int = 16384,
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Single LLM call. Returns: (response_message_dict, usage_dict with cost)."""
+        """
+        Single LLM call. Returns: (response_message_dict, usage_dict with cost).
+        
+        Optimized for CLIProxyAPI:
+        - Disables thinking mode by default for stability
+        - Handles reasoning_content from thinking models
+        - Estimates cost locally when API doesn't provide it
+        """
         client = self._get_client()
         effort = normalize_reasoning_effort(effort)
 
-        extra_body: Dict[str, Any] = {
-            "reasoning": {"effort": effort, "exclude": True},
-        }
-
-        # Pin Anthropic models to Anthropic provider for prompt caching
-        if model.startswith("anthropic/"):
-            extra_body["provider"] = {
-                "order": ["Anthropic"],
-                "allow_fallbacks": False,
-                "require_parameters": True,
-            }
+        # Build extra_body for CLIProxyAPI compatibility
+        # Key: disable thinking mode to prevent empty content responses
+        extra_body: Dict[str, Any] = {}
+        
+        if self._is_cliproxy:
+            # Disable thinking mode for thinking models (Qwen3, DeepSeek-R1, etc.)
+            # This ensures content is in the standard 'content' field, not 'reasoning_content'
+            if is_thinking_model(model):
+                extra_body["enable_thinking"] = False
+                log.debug(f"Disabled thinking mode for model: {model}")
+        else:
+            # OpenRouter-specific settings
+            extra_body["reasoning"] = {"effort": effort, "exclude": True}
+            
+            # Pin Anthropic models to Anthropic provider for prompt caching
+            if model.startswith("anthropic/"):
+                extra_body["provider"] = {
+                    "order": ["Anthropic"],
+                    "allow_fallbacks": False,
+                    "require_parameters": True,
+                }
 
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            # Removed extra_body to support custom API
         }
+        
+        # Only add extra_body if we have settings
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+            
         if tools:
             # Add cache_control to last tool for Anthropic prompt caching
             # This caches all tool schemas (they never change between calls)
@@ -213,6 +328,22 @@ class LLMClient:
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
         msg = (choices[0] if choices else {}).get("message") or {}
+
+        # === CLIProxyAPI compatibility: handle reasoning_content ===
+        # Qwen3 thinking models may return content in reasoning_content instead of content
+        content = msg.get("content")
+        reasoning_content = msg.get("reasoning_content")
+        
+        if not content or not content.strip():
+            # Empty content - check if reasoning_content has the actual response
+            if reasoning_content and reasoning_content.strip():
+                log.debug(f"Model {model} returned reasoning_content instead of content, using it")
+                msg["content"] = reasoning_content
+                # Optionally prefix to indicate it was from reasoning
+                # msg["content"] = f"[Reasoning]\n{reasoning_content}"
+            else:
+                # Both empty - this is a true empty response
+                log.warning(f"Model {model} returned empty content and reasoning_content")
 
         # Extract cached_tokens from prompt_tokens_details if available
         if not usage.get("cached_tokens"):
@@ -232,13 +363,27 @@ class LLMClient:
                 if cache_write:
                     usage["cache_write_tokens"] = int(cache_write)
 
-        # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
+        # Ensure cost is present in usage
         if not usage.get("cost"):
-            gen_id = resp_dict.get("id") or ""
-            if gen_id:
-                cost = self._fetch_generation_cost(gen_id)
-                if cost is not None:
-                    usage["cost"] = cost
+            # First try OpenRouter generation API (if not CLIProxyAPI)
+            if not self._is_cliproxy:
+                gen_id = resp_dict.get("id") or ""
+                if gen_id:
+                    cost = self._fetch_generation_cost(gen_id)
+                    if cost is not None:
+                        usage["cost"] = cost
+            
+            # Fallback: estimate cost locally
+            if not usage.get("cost") and usage.get("prompt_tokens"):
+                estimated = estimate_cost_local(
+                    model,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    usage.get("cached_tokens", 0),
+                )
+                if estimated > 0:
+                    usage["cost"] = estimated
+                    log.debug(f"Estimated cost locally for {model}: ${estimated:.6f}")
 
         return msg, usage
 
