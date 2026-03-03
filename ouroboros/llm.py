@@ -12,6 +12,15 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.config import (
+    get_config,
+    get_default_model,
+    get_fallback_models,
+    get_all_available_models,
+    get_openrouter_api_key,
+    get_openai_base_url,
+)
+
 log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "glm-5"
@@ -110,8 +119,9 @@ class LLMClient:
         api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
     ):
-        self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = os.environ.get("OPENAI_BASE_URL", base_url)
+        # Use dynamic config for API key and base URL
+        self._api_key = api_key or get_openrouter_api_key() or os.environ.get("OPENROUTER_API_KEY", "")
+        self._base_url = get_openai_base_url() or os.environ.get("OPENAI_BASE_URL", base_url)
         self._client = None
 
     def _get_client(self):
@@ -279,17 +289,9 @@ class LLMClient:
         return text, usage
 
     def default_model(self) -> str:
-        """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "glm-5")
+        """Return the default model, checking config file first for hot-reload."""
+        return get_default_model()
 
     def available_models(self) -> List[str]:
-        """Return list of available models from env (for switch_model tool schema)."""
-        main = os.environ.get("OUROBOROS_MODEL", "glm-5")
-        code = os.environ.get("OUROBOROS_MODEL_CODE", "")
-        light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
-        models = [main]
-        if code and code != main:
-            models.append(code)
-        if light and light != main and light != code:
-            models.append(light)
-        return models
+        """Return all available models (for switch_model tool schema)."""
+        return get_all_available_models()
