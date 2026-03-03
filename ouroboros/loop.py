@@ -23,6 +23,7 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
 from ouroboros.resilience import get_circuit_breaker, get_iteration_guardian, get_global_api_health
+from ouroboros.config import get_fallback_models
 
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,10 @@ _MODEL_PRICING_STATIC = {
     "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
+    "qwen3.5-plus": (0.40, 0.04, 2.40),
+    "kimi-k2.5": (0.50, 0.05, 3.0),
+    "MiniMax-M2.5": (0.60, 0.06, 3.5),
+    "gemini-2.5-flash-lite": (0.10, 0.01, 0.50),
 }
 
 _pricing_fetched = False
@@ -179,8 +184,7 @@ def _execute_single_tool(
 
     # Log tool execution (sanitize secrets from result before persisting)
     append_jsonl(drive_logs / "tools.jsonl", {
-        "ts": utc_now_iso(), "tool": fn_name, "task_id": task_id,
-        "args": args_for_log,
+        "ts": utc_now_iso(), "tool": fn_name, "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
     })
 
@@ -426,129 +430,97 @@ def _check_budget_limits(
     budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
 
     if budget_pct > 0.5:
-        # Hard stop — budget exceeded 50% of remaining budget on this task
-        # Inform LLM so it can wrap up quickly
-        warn_msg = f"[BUDGET_WARN] Task cost ${task_cost:.3f} exceeds 50% of remaining budget ${budget_remaining_usd:.3f}. Please wrap up now."
-        messages.append({"role": "system", "content": warn_msg})
+        # Hard stop — return budget exceeded message
+        # Return in same format as run_tool_loop
+        return (
+            f"⚠️ BUDGET_EXCEEDED: Task cost ${task_cost:.4f} exceeds 50% of remaining budget ${budget_remaining_usd:.2f}. "
+            f"Stopping to prevent runaway costs.",
+        ), accumulated_usage, llm_trace
 
-    if budget_pct > 0.8:
-        # Critical — force completion
-        finish_reason = f"⚠️ Task cost ${task_cost:.3f} exceeded 80% of remaining budget ${budget_remaining_usd:.3f}. Task terminated."
-        messages.append({"role": "system", "content": f"[BUDGET_STOP] {finish_reason}"})
-        try:
-            final_msg, final_cost = _call_llm_with_retry(
-                llm, messages, active_model, None, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
-            )
-            if final_msg:
-                return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-        except Exception:
-            log.warning("Failed to get final response after budget stop", exc_info=True)
-        return finish_reason, accumulated_usage, llm_trace
+    if budget_pct > 0.25:
+        # Warning — add to messages but continue
+        warning = (
+            f"⚠️ BUDGET_WARNING: Task cost ${task_cost:.4f} is {budget_pct*100:.0f}% of remaining budget ${budget_remaining_usd:.2f}. "
+            f"Consider wrapping up soon."
+        )
+        messages.append({"role": "user", "content": warning})
+        # Record warning in trace
+        llm_trace["assistant_notes"].append(f"Budget warning: {budget_pct*100:.0f}%")
 
     return None
 
 
-def _maybe_inject_self_check(
-    round_idx: int,
-    max_rounds: int,
+def _call_llm_with_retry(
+    llm: LLMClient,
     messages: List[Dict[str, Any]],
-    accumulated_usage: Dict[str, Any],
-    emit_progress: Callable[[str], None],
-):
-    """
-    Inject a self-check reminder every 50 rounds if the task is taking long.
-    LLM-first: agent decides what to do, this is just a nudge.
-    """
-    if round_idx > 0 and round_idx % 50 == 0:
-        task_cost = accumulated_usage.get("cost", 0)
-        check_msg = (
-            f"[SELF_CHECK] Round {round_idx}/{max_rounds}. "
-            f"Task cost so far: ${task_cost:.3f}. "
-            f"If you're stuck, consider: (1) using schedule_task for parallel work, "
-            f"(2) switching to a more capable model via switch_model, "
-            f"(3) simplifying the approach, or (4) asking the owner for guidance."
-        )
-        messages.append({"role": "system", "content": check_msg})
-        emit_progress(f"📍 Round {round_idx}, task cost: ${task_cost:.3f}")
-
-
-def _drain_incoming_messages(
-    messages: List[Dict[str, Any]],
-    incoming_messages: Optional[List[Dict[str, Any]]],
-    drive_root: Optional[pathlib.Path],
-    task_id: str,
-    event_queue: Optional[queue.Queue],
-    seen_set: set,
-):
-    """
-    Drain owner messages from in-process queue and Drive mailbox.
-
-    Messages are appended to the messages list as [Owner message during task]: ...
-    """
-    # In-process queue (from telegram bot)
-    if incoming_messages:
-        while incoming_messages:
-            msg = incoming_messages.pop(0)
-            owner_text = msg.get("text", "")
-            if owner_text:
-                messages.append({
-                    "role": "user",
-                    "content": f"[Owner message during task]: {owner_text}"
-                })
-
-    # Drive mailbox (for background tasks / long-running tasks)
-    if drive_root:
-        mailbox_path = drive_root / "mailbox"
-        if mailbox_path.exists():
-            for entry in list(mailbox_path.iterdir()):
-                if entry.suffix == ".json" and entry.name not in seen_set:
-                    try:
-                        data = json.loads(entry.read_text(encoding="utf-8"))
-                        owner_text = data.get("text", "")
-                        if owner_text:
-                            messages.append({
-                                "role": "user",
-                                "content": f"[Owner message during task]: {owner_text}"
-                            })
-                        seen_set.add(entry.name)
-                    except Exception as e:
-                        log.warning(f"Failed to read mailbox entry {entry}: {e}")
-
-
-def _setup_dynamic_tools(
-    tools: ToolRegistry,
+    model: str,
     tool_schemas: List[Dict[str, Any]],
-    messages: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[str]]:
+    effort: str,
+    max_retries: int,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    round_idx: int,
+    event_queue: Optional[queue.Queue],
+    accumulated_usage: Dict[str, Any],
+    task_type: str = "task",
+) -> Tuple[Optional[Dict[str, Any]], float]:
     """
-    Set up dynamic tool discovery.
+    Call LLM with retry and exponential backoff.
 
-    Returns: (tool_schemas, enabled_extra_tools)
+    Returns: (message, cost) or (None, 0) if all retries failed
     """
-    enabled_extra_tools = []
+    import random
+    cb = get_circuit_breaker()
+    global_health = get_global_api_health()
 
-    # Check if LLM previously requested extra tools
-    ctx = tools._ctx
-    if ctx and hasattr(ctx, 'enabled_tools') and ctx.enabled_tools:
-        for tool_name in ctx.enabled_tools:
-            schema = tools.schema(tool_name)
-            if schema:
-                tool_schemas.append(schema)
-                enabled_extra_tools.append(tool_name)
+    # Check if this specific model is blocked
+    if not cb.is_available(model):
+        log.warning(f"Model {model} is blocked by circuit breaker")
+        return None, 0.0
 
-    # Inject tool discovery hint if there are more tools available
-    all_tools = tools.list_tools()
-    core_tools = tools.list_core_tools()
-    extra_tools = [t for t in all_tools if t not in core_tools]
-    if extra_tools and not enabled_extra_tools:
-        hint = (
-            f"[TOOL_HINT] {len(extra_tools)} additional tools available. "
-            f"Use list_available_tools to see them, enable_tools to activate them."
-        )
-        messages.append({"role": "system", "content": hint})
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response, usage = llm.call(
+                messages=messages,
+                model=model,
+                tools=tool_schemas,
+                effort=effort,
+            )
+            # Record success
+            cb.record_success(model)
+            global_health.record_success()
 
-    return tool_schemas, enabled_extra_tools
+            # Update accumulated usage
+            if usage:
+                add_usage(accumulated_usage, usage)
+                cost = _estimate_cost(
+                    model,
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                    usage.get("cached_tokens", 0),
+                    usage.get("cache_write_tokens", 0),
+                )
+                return response, cost
+            return response, 0.0
+
+        except Exception as e:
+            last_error = e
+            log.warning(f"LLM call failed (attempt {attempt+1}/{max_retries}): {e}")
+
+            # Record failure
+            cb.record_failure(model)
+            global_health.record_failure([str(e)])
+
+            # Exponential backoff with jitter
+            if attempt < max_retries - 1:
+                base_delay = 2 ** attempt
+                jitter = random.uniform(0, 0.5)
+                time.sleep(base_delay + jitter)
+
+    # All retries failed
+    log.error(f"All {max_retries} LLM retries failed for model {model}")
+    return None, 0.0
 
 
 def _process_tool_results(
@@ -558,300 +530,107 @@ def _process_tool_results(
     emit_progress: Callable[[str], None],
 ) -> int:
     """
-    Process tool execution results and append to messages.
+    Process tool results and append to messages.
 
     Returns: Number of errors encountered
     """
-    error_count = 0
+    errors = 0
     for r in results:
         tool_call_id = r["tool_call_id"]
         fn_name = r["fn_name"]
         result = r["result"]
         is_error = r["is_error"]
+        is_code_tool = r["is_code_tool"]
+
         if is_error:
-            error_count += 1
-        result_str = _truncate_tool_result(result)
+            errors += 1
+
+        # Emit progress for code tools
+        if is_code_tool and not is_error:
+            emit_progress(f"✓ {fn_name}")
+        elif is_code_tool and is_error:
+            emit_progress(f"✗ {fn_name}")
+
+        # Record in trace
+        llm_trace["tool_calls"].append({
+            "name": fn_name,
+            "success": not is_error,
+        })
+
+        # Append result to messages
         messages.append({
             "role": "tool",
             "tool_call_id": tool_call_id,
             "name": fn_name,
-            "content": result_str,
+            "content": _truncate_tool_result(result),
         })
-        llm_trace["tool_calls"].append({
-            "name": fn_name,
-            "args": r.get("args_for_log", {}),
-            "result_preview": truncate_for_log(result, 500),
-            "is_error": is_error,
-        })
-        # Emit progress for code tools (owner sees activity)
-        if r["is_code_tool"] and not is_error:
-            emit_progress(f"✓ {fn_name}")
-    return error_count
 
-
-def _emit_llm_usage_event(
-    event_queue: Optional[queue.Queue],
-    task_id: str,
-    model: str,
-    usage: Dict[str, Any],
-    cost: float,
-    category: str = "task",
-):
-    """Emit an LLM usage event to the event queue (real-time budget tracking)."""
-    if not event_queue:
-        return
-    try:
-        event_queue.put_nowait({
-            "type": "llm_usage",
-            "ts": utc_now_iso(),
-            "task_id": task_id,
-            "model": model,
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
-            "cached_tokens": int(usage.get("cached_tokens") or 0),
-            "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
-            "cost": cost,
-            "cost_estimated": not bool(usage.get("cost")),
-            "usage": usage,
-            "category": category,
-        })
-    except Exception:
-        log.debug("Failed to put llm_usage event to queue", exc_info=True)
-
-
-def _call_llm_with_retry(
-    llm: LLMClient,
-    messages: List[Dict[str, Any]],
-    model: str,
-    tools: Optional[List[Dict[str, Any]]],
-    effort: str,
-    max_retries: int,
-    drive_logs: pathlib.Path,
-    task_id: str,
-    round_idx: int,
-    event_queue: Optional[queue.Queue],
-    accumulated_usage: Dict[str, Any],
-    task_type: str = "",
-) -> Tuple[Optional[Dict[str, Any]], float]:
-    """
-    Call LLM with retry logic, usage tracking, and event emission.
-
-    Returns:
-        (response_message, cost) on success
-        (None, 0.0) on failure after max_retries
-    """
-    msg = None
-    last_error: Optional[Exception] = None
-
-    for attempt in range(max_retries):
-        try:
-            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
-            if tools:
-                kwargs["tools"] = tools
-            resp_msg, usage = llm.chat(**kwargs)
-            msg = resp_msg
-            add_usage(accumulated_usage, usage)
-
-            # Calculate cost and emit Event for EVERY attempt (including retries)
-            cost = float(usage.get("cost") or 0)
-            if not cost:
-                cost = _estimate_cost(
-                    model,
-                    int(usage.get("prompt_tokens") or 0),
-                    int(usage.get("completion_tokens") or 0),
-                    int(usage.get("cached_tokens") or 0),
-                    int(usage.get("cache_write_tokens") or 0),
-                )
-
-            # Emit real-time usage event with category based on task_type
-            category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
-            _emit_llm_usage_event(event_queue, task_id, model, usage, cost, category)
-
-            # Empty response = retry-worthy (model sometimes returns empty content with no tool_calls)
-            tool_calls = msg.get("tool_calls") or []
-            content = msg.get("content")
-            if not tool_calls and (not content or not content.strip()):
-                log.warning("LLM returned empty response (no content, no tool_calls), attempt %d/%d", attempt + 1, max_retries)
-
-                # Log raw empty response for debugging
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "llm_empty_response",
-                    "task_id": task_id,
-                    "round": round_idx, "attempt": attempt + 1,
-                    "model": model,
-                    "raw_content": repr(content)[:500] if content else None,
-                    "raw_tool_calls": repr(tool_calls)[:500] if tool_calls else None,
-                    "finish_reason": msg.get("finish_reason") or msg.get("stop_reason"),
-                })
-
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                # Last attempt — return None to trigger "could not get response"
-                return None, cost
-
-            # Count only successful rounds
-            accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
-
-            # Log per-round metrics
-            _round_event = {
-                "ts": utc_now_iso(), "type": "llm_round",
-                "task_id": task_id,
-                "round": round_idx, "model": model,
-                "reasoning_effort": effort,
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "cached_tokens": usage.get("cached_tokens"),
-                "cost": cost,
-                "attempt": attempt + 1,
-            }
-            append_jsonl(drive_logs / "events.jsonl", _round_event)
-
-            return msg, cost
-
-        except Exception as e:
-            last_error = e
-            log.warning("LLM call failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
-
-            # Log error
-            append_jsonl(drive_logs / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "llm_error",
-                "task_id": task_id,
-                "round": round_idx, "attempt": attempt + 1,
-                "model": model,
-                "error": str(e)[:500],
-            })
-
-            # Record failure in circuit breaker
-            cb = get_circuit_breaker()
-            cb.record_failure(model, str(e))
-
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-
-    # All retries exhausted
-    return None, 0.0
+    return errors
 
 
 def run_tool_loop(
     llm: LLMClient,
     messages: List[Dict[str, Any]],
+    tool_schemas: List[Dict[str, Any]],
     tools: ToolRegistry,
     drive_logs: pathlib.Path,
-    incoming_messages: Optional[List[Dict[str, Any]]] = None,
-    emit_progress: Callable[[str], None] = lambda _: None,
-    task_type: str = "",
     task_id: str = "",
-    budget_remaining_usd: Optional[float] = None,
     event_queue: Optional[queue.Queue] = None,
-    initial_effort: str = "medium",
-    drive_root: Optional[pathlib.Path] = None,
+    max_rounds: int = 200,
+    max_retries: int = 3,
+    emit_progress: Optional[Callable[[str], None]] = None,
+    budget_remaining_usd: Optional[float] = None,
+    task_type: str = "task",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
-    Core LLM-with-tools loop.
-
-    Sends messages to LLM, executes tool calls, retries on errors.
-    LLM controls model/effort via switch_model tool (LLM-first, Bible P3).
+    Run the tool loop: send messages to LLM, execute tool calls, repeat until final response.
 
     Args:
-        budget_remaining_usd: If set, forces completion when task cost exceeds 50% of this budget
-        initial_effort: Initial reasoning effort level (default "medium")
+        llm: LLM client
+        messages: Conversation history
+        tool_schemas: Tool definitions for LLM
+        tools: Tool registry for execution
+        drive_logs: Path to logs directory
+        task_id: Task identifier for logging
+        event_queue: Optional queue for progress events
+        max_rounds: Maximum rounds before stopping
+        max_retries: Maximum retries per LLM call
+        emit_progress: Optional callback for progress messages
+        budget_remaining_usd: Optional budget limit
+        task_type: Task type (task, evolution, etc.)
 
-    Returns: (final_text, accumulated_usage, llm_trace)
+    Returns:
+        (final_text, usage_stats, llm_trace)
     """
-    # LLM-first: single default model, LLM switches via tool if needed
-    active_model = llm.default_model()
-    active_effort = initial_effort
-
-    llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
-    accumulated_usage: Dict[str, Any] = {}
-    max_retries = 3
-    # Wire module-level registry ref so tool_discovery handlers work outside run_llm_loop too
-    from ouroboros.tools import tool_discovery as _td
-    _td.set_registry(tools)
-
-    # Selective tool schemas: core set + meta-tools for discovery.
-    tool_schemas = tools.schemas(core_only=True)
-    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
-
-    # Set budget tracking on tool context for real-time usage events
-    tools._ctx.event_queue = event_queue
-    tools._ctx.task_id = task_id
-    # Thread-sticky executor for browser tools (Playwright sync requires greenlet thread-affinity)
+    # Initialize state
+    active_model = llm.model
+    active_effort = llm.effort
     stateful_executor = _StatefulToolExecutor()
-    # Dedup set for per-task owner messages from Drive mailbox
-    _owner_msg_seen: set = set()
-    try:
-        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
-    except (ValueError, TypeError):
-        MAX_ROUNDS = 200
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
-    round_idx = 0
-    
-    # Get GlobalApiHealth instance for cooldown tracking
+    accumulated_usage: Dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
+    llm_trace = {
+        "rounds": 0,
+        "tool_calls": [],
+        "assistant_notes": [],
+        "models_tried": [active_model],
+    }
     global_health = get_global_api_health()
-    
+
+    if emit_progress is None:
+        emit_progress = lambda _: None
+
     try:
-        while True:
-            round_idx += 1
+        for round_idx in range(max_rounds):
+            llm_trace["rounds"] = round_idx + 1
 
-            # Check global API health - if all models failed recently, wait for cooldown
-            if global_health.is_globally_blocked():
-                remaining = global_health.get_remaining_cooldown()
+            # Check iteration guardian (prevents infinite loops)
+            guardian = get_iteration_guardian()
+            if guardian.should_stop(round_idx, task_type):
                 return (
-                    f"⚠️ All LLM APIs are temporarily unavailable. "
-                    f"Global cooldown: {remaining:.0f}s remaining. "
-                    f"Please wait and try again later.",
-                    accumulated_usage,
-                    llm_trace
-                )
+                    f"⚠️ ITERATION_LIMIT: Reached {round_idx} rounds. "
+                    f"Stopping to prevent infinite loop. Please simplify your request.",
+                ), accumulated_usage, llm_trace
 
-            # Hard limit on rounds to prevent runaway tasks
-            if round_idx > MAX_ROUNDS:
-                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_task."
-                messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
-                try:
-                    final_msg, final_cost = _call_llm_with_retry(
-                        llm, messages, active_model, None, active_effort,
-                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
-                    )
-                    if final_msg:
-                        return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-                    return finish_reason, accumulated_usage, llm_trace
-                except Exception:
-                    log.warning("Failed to get final response after round limit", exc_info=True)
-                    return finish_reason, accumulated_usage, llm_trace
-
-            # Soft self-check reminder every 50 rounds (LLM-first: agent decides, not code)
-            _maybe_inject_self_check(round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress)
-
-            # Apply LLM-driven model/effort switch (via switch_model tool)
-            ctx = tools._ctx
-            if ctx.active_model_override:
-                active_model = ctx.active_model_override
-                ctx.active_model_override = None
-            if ctx.active_effort_override:
-                active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
-                ctx.active_effort_override = None
-
-            # Inject owner messages (in-process queue + Drive mailbox)
-            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
-
-            # Compact old tool history when needed
-            # Check for LLM-requested compaction first (via compact_context tool)
-            pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            if pending_compaction is not None:
-                messages = compact_tool_history_llm(messages, keep_recent=pending_compaction)
-                tools._ctx._pending_compaction = None
-            elif round_idx > 8:
-                messages = compact_tool_history(messages, keep_recent=6)
-            elif round_idx > 3:
-                # Light compaction: only if messages list is very long (>60 items)
-                if len(messages) > 60:
-                    messages = compact_tool_history(messages, keep_recent=6)
-
-            # --- LLM call with retry ---
+            # Call LLM with retry
             msg, cost = _call_llm_with_retry(
                 llm, messages, active_model, tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
@@ -860,10 +639,7 @@ def run_tool_loop(
             # Fallback logic: try ALL available fallback models before giving up
             if msg is None:
                 cb = get_circuit_breaker()
-                fallback_list_raw = os.environ.get(
-                    "OUROBOROS_MODEL_FALLBACK_LIST",
-                    ""
-                )
+                fallback_list_raw = get_fallback_models()  # Dynamic config (hot-reload)
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
                 
                 # Remove active_model from fallback list (no point trying same model)
@@ -883,89 +659,118 @@ def run_tool_loop(
                 for fallback_model in fallback_candidates:
                     # Skip if this model is currently blocked by circuit breaker
                     if not cb.is_available(fallback_model):
-                        log.info("Skipping blocked fallback model: %s", fallback_model)
+                        log.info(f"Skipping blocked fallback model: {fallback_model}")
                         continue
                     
-                    # Emit progress message so user sees fallback happening
-                    fallback_progress = f"⚡ Fallback: {active_model} → {fallback_model}"
-                    emit_progress(fallback_progress)
+                    # Record fallback attempt
+                    llm_trace["models_tried"].append(fallback_model)
+                    emit_progress(f"⚡ Fallback: {active_model} → {fallback_model}")
                     
-                    msg, fallback_cost = _call_llm_with_retry(
-                        llm, messages, fallback_model, tool_schemas, active_effort,
+                    # Update active model for this attempt
+                    active_model = fallback_model
+                    
+                    # Try this fallback model
+                    msg, cost = _call_llm_with_retry(
+                        llm, messages, active_model, tool_schemas, active_effort,
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
                     )
                     
                     if msg is not None:
-                        # Fallback succeeded! Reset circuit breaker for this model
-                        cb.reset(fallback_model)
-                        # Continue processing with this msg
+                        # Success! Continue with this model
                         break
                     else:
-                        all_errors.append(f"{fallback_model}: failed")
-                else:
-                    # All fallback models failed - trigger global cooldown
-                    global_health.record_global_failure(all_errors)
-                    return (
-                        f"⚠️ All LLM models are currently unavailable. "
-                        f"Tried: {active_model} → {', '.join(fallback_candidates)}. "
-                        f"System is in cooldown mode. Please wait a moment and try again.",
-                    ), accumulated_usage, llm_trace
-
-                # If we got here with msg=None, something went wrong
+                        all_errors.append(fallback_model)
+                
+                # If all fallbacks failed, return error
                 if msg is None:
-                    global_health.record_global_failure([f"All {len(fallback_candidates) + 1} models failed"])
-                    return (
-                        f"⚠️ Failed to get a response from any model. "
-                        f"Please try again in a few seconds.",
-                    ), accumulated_usage, llm_trace
+                    # Record global failure
+                    global_health.record_global_failure(all_errors)
+                    
+                    # Check if ALL models are blocked
+                    all_blocked = all(not cb.is_available(m) for m in [active_model] + fallback_candidates)
+                    if all_blocked:
+                        return (
+                            f"⚠️ All models are temporarily blocked due to repeated failures. "
+                            f"Circuit breaker will reset in a few minutes. Please try again later.",
+                        ), accumulated_usage, llm_trace
+                    else:
+                        return (
+                            f"⚠️ Failed to get a response from model {active_model} after 3 attempts. "
+                            f"All fallback models match the active one. Try rephrasing your request.",
+                        ), accumulated_usage, llm_trace
 
-            tool_calls = msg.get("tool_calls") or []
+            # Handle the response
+            if msg is None:
+                # Should not reach here, but safety check
+                return (
+                    f"⚠️ No response received from LLM. Please try again.",
+                ), accumulated_usage, llm_trace
+
+            # Check for tool calls
+            tool_calls = msg.get("tool_calls", [])
             content = msg.get("content")
-            # No tool calls — final response
+
+            # No tool calls = final response
             if not tool_calls:
                 return _handle_text_response(content, llm_trace, accumulated_usage)
 
-            # Process tool calls
-            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+            # Has tool calls = execute them
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls,
+            })
 
-            if content and content.strip():
-                emit_progress(content.strip())
-                llm_trace["assistant_notes"].append(content.strip()[:320])
-
-            error_count = _handle_tool_calls(
-                tool_calls,
-                tools,
-                drive_logs,
-                task_id,
-                stateful_executor,
-                messages,
-                llm_trace,
-                emit_progress,
+            # Execute tool calls
+            errors = _handle_tool_calls(
+                tool_calls, tools, drive_logs, task_id,
+                stateful_executor, messages, llm_trace, emit_progress
             )
 
-            # Check for request_stop tool result
-            for tc in tool_calls:
-                if tc.get("function", {}).get("name") == "request_stop":
-                    # LLM requested to stop — look for the tool result in messages
-                    for i in range(len(messages) - 1, max(0, len(messages) - 5), -1):
-                        m = messages[i]
-                        if m.get("role") == "tool" and m.get("name") == "request_stop":
-                            result = m.get("content", "")
-                            # Try to parse as JSON
-                            try:
-                                result_data = json.loads(result)
-                                if isinstance(result_data, dict) and "text" in result_data:
-                                    return result_data["text"], accumulated_usage, llm_trace
-                            except (json.JSONDecodeError, ValueError):
-                                pass
-                            return result, accumulated_usage, llm_trace
-                    return "Stop requested.", accumulated_usage, llm_trace
+            # Check budget
+            budget_result = _check_budget_limits(
+                budget_remaining_usd, accumulated_usage, round_idx, messages,
+                llm, active_model, active_effort, max_retries, drive_logs,
+                task_id, event_queue, llm_trace, task_type
+            )
+            if budget_result is not None:
+                return budget_result
 
-            # Tool errors exceed threshold — inject warning, don't abort
-            if error_count > 0:
-                warn_msg = f"[TOOL_ERROR] {error_count} tool call(s) failed in this round. Consider alternatives or inform the owner."
-                messages.append({"role": "system", "content": warn_msg})
+        # Max rounds reached
+        return (
+            f"⚠️ MAX_ROUNDS: Reached {max_rounds} tool call rounds. "
+            f"Please simplify your request or break it into smaller tasks.",
+        ), accumulated_usage, llm_trace
 
     finally:
         # Cleanup stateful executor
         stateful_executor.shutdown(wait=False, cancel_futures=True)
+
+
+# Convenience function for backward compatibility
+def run_tool_loop_simple(
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    model: str = "qwen3.5-plus",
+    effort: str = "medium",
+    **kwargs,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """
+    Simple wrapper for run_tool_loop that creates LLM client internally.
+    For backward compatibility with older code.
+    """
+    from ouroboros.llm import LLMClient
+    llm = LLMClient(model=model, effort=effort)
+    drive_logs = pathlib.Path("/tmp/ouroboros_logs")
+    drive_logs.mkdir(exist_ok=True)
+    
+    tool_schemas = tools.get_schemas()
+    
+    return run_tool_loop(
+        llm=llm,
+        messages=messages,
+        tool_schemas=tool_schemas,
+        tools=tools,
+        drive_logs=drive_logs,
+        **kwargs,
+    )
