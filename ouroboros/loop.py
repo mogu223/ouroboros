@@ -22,6 +22,8 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
+from ouroboros.resilience import get_circuit_breaker, get_iteration_guardian
+
 
 log = logging.getLogger(__name__)
 
@@ -698,17 +700,14 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
-                # Configurable fallback priority list (Bible P3: no hardcoded behavior)
+                # Use Circuit Breaker for intelligent fallback selection
+                cb = get_circuit_breaker()
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
                     "glm-5"
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
-                fallback_model = None
-                for candidate in fallback_candidates:
-                    if candidate != active_model:
-                        fallback_model = candidate
-                        break
+                fallback_model = cb.select_fallback(active_model, fallback_candidates)
                 if fallback_model is None:
                     return (
                         f"⚠️ Failed to get a response from model {active_model} after {max_retries} attempts. "
