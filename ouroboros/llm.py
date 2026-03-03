@@ -111,7 +111,7 @@ class LLMClient:
         base_url: str = "https://openrouter.ai/api/v1",
     ):
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = base_url
+        self._base_url = os.environ.get("OPENAI_BASE_URL", base_url)
         self._client = None
 
     def _get_client(self):
