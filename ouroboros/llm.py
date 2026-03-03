@@ -118,7 +118,12 @@ class LLMClient:
         self,
         api_key: Optional[str] = None,
         base_url: str = "https://openrouter.ai/api/v1",
+        model: Optional[str] = None,
+        effort: str = "medium",
     ):
+        from ouroboros.config import get_default_model
+        self.model = model or get_default_model()
+        self.effort = effort
         # Use dynamic config for API key and base URL
         self._api_key = api_key or get_openrouter_api_key() or os.environ.get("OPENROUTER_API_KEY", "")
         self._base_url = get_openai_base_url() or os.environ.get("OPENAI_BASE_URL", base_url)
