@@ -77,7 +77,7 @@ def get_git_info(repo_path):
     except Exception:
         return {"branch": "unknown", "commit": "unknown"}
 
-def sanitize_task_for_event(task):
+def sanitize_task_for_event(task, *args, **kwargs):
     if not task: return ""
     return truncate_for_log(str(task).replace("\n", " ").strip(), 200)
 
