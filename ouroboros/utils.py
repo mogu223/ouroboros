@@ -73,9 +73,9 @@ def get_git_info(repo_path):
         cwd = str(repo_path)
         branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd, text=True).strip()
         commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd, text=True).strip()
-        return {"branch": branch, "commit": commit}
+        return branch, commit
     except Exception:
-        return {"branch": "unknown", "commit": "unknown"}
+        return "unknown", "unknown"
 
 def sanitize_task_for_event(task, *args, **kwargs):
     if not task: return ""
