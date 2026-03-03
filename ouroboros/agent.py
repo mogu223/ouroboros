@@ -413,18 +413,18 @@ class OuroborosAgent:
 
             try:
                 text, usage, llm_trace = run_tool_loop(
-                    messages=messages,
-                    tools=self.tools,
                     llm=self.llm,
+                    messages=messages,
+                    tool_schemas=self.tools.schemas(),
+                    tools=self.tools,
                     drive_logs=drive_logs,
-                    emit_progress=self._emit_progress,
-                    incoming_messages=self._incoming_messages,
-                    task_type=task_type_str,
                     task_id=str(task.get("id") or ""),
-                    budget_remaining_usd=budget_remaining,
                     event_queue=self._event_queue,
-                    initial_effort=initial_effort,
-                    drive_root=self.env.drive_root,
+                    max_rounds=200,
+                    max_retries=3,
+                    emit_progress=self._emit_progress,
+                    budget_remaining_usd=budget_remaining,
+                    task_type=task_type_str,
                 )
             except Exception as e:
                 tb = traceback.format_exc()
