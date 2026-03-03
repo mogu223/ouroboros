@@ -54,7 +54,7 @@ def append_jsonl(path, data, encoding="utf-8"):
     with p.open("a", encoding=encoding) as f:
         f.write(json.dumps(data, ensure_ascii=False) + "\n")
 
-def safe_relpath(path, start):
+def safe_relpath(path, start="."):
     import pathlib
     try:
         return str(pathlib.Path(path).relative_to(start))
@@ -117,4 +117,10 @@ def short(text, max_len=100):
 
 def clip_text(text, max_len=1000):
     return short(text, max_len)
+
+
+def run_cmd(cmd, cwd=None, timeout=None):
+    import subprocess
+    r = subprocess.run(cmd, cwd=cwd, timeout=timeout, capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
 
