@@ -166,7 +166,7 @@ class LLMClient:
             pass
         return None
 
-    def chat(
+    def call(
         self,
         messages: List[Dict[str, Any]],
         model: str,
