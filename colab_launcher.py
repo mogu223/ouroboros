@@ -153,7 +153,7 @@ if str(ANTHROPIC_API_KEY or "").strip():
 # 2) Mount Drive
 # ----------------------------
 if not pathlib.Path("/content/drive/MyDrive").exists():
-    drive.mount("/content/drive")
+    pass
 
 DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
 REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
