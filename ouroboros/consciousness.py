@@ -192,7 +192,7 @@ class BackgroundConsciousness:
             for round_idx in range(1, self._MAX_BG_ROUNDS + 1):
                 if self._paused:
                     break
-                msg, usage = self._llm.chat(
+                msg, usage = self._llm.call(
                     messages=messages,
                     model=model,
                     tools=tools,

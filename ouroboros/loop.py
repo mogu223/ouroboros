@@ -639,8 +639,8 @@ def run_tool_loop(
             # Fallback logic: try ALL available fallback models before giving up
             if msg is None:
                 cb = get_circuit_breaker()
-                fallback_list_raw = get_fallback_models()  # Dynamic config (hot-reload)
-                fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
+                fallback_candidates = get_fallback_models()  # Dynamic config (hot-reload)
+                
                 
                 # Remove active_model from fallback list (no point trying same model)
                 fallback_candidates = [m for m in fallback_candidates if m != active_model]
