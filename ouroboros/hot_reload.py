@@ -94,6 +94,7 @@ def perform_hot_reload(reason: str, ctx: Any) -> bool:
     
     try:
         from supervisor import workers
+        from ouroboros.utils import append_jsonl
         
         # Check if agent is busy
         if workers._chat_agent is not None and getattr(workers._chat_agent, '_busy', False):
@@ -109,8 +110,8 @@ def perform_hot_reload(reason: str, ctx: Any) -> bool:
             return False
         
         # Log success
-        ctx.append_jsonl(
-            ctx.DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
+        append_jsonl(
+            ctx.drive_root / 'logs' / 'supervisor.jsonl',
             {
                 'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'type': 'hot_reload',
