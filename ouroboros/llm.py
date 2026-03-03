@@ -111,7 +111,7 @@ class LLMClient:
         base_url: str = "https://openrouter.ai/api/v1",
     ):
         self._api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self._base_url = base_url
+        self._base_url = os.environ.get("OPENAI_BASE_URL", base_url)
         self._client = None
 
     def _get_client(self):
@@ -280,7 +280,7 @@ class LLMClient:
 
     def default_model(self) -> str:
         """Return the single default model from env. LLM switches via tool if needed."""
-        return os.environ.get("OUROBOROS_MODEL", "anthropic/claude-sonnet-4.6")
+        return os.environ.get("OPENAI_MODEL", os.environ.get("OUROBOROS_MODEL", "qwen3.5-plus"))
 
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
