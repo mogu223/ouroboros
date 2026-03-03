@@ -180,7 +180,7 @@ class LLMClient:
             "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
-            "extra_body": extra_body,
+            # Removed extra_body to support custom API
         }
         if tools:
             # Add cache_control to last tool for Anthropic prompt caching
