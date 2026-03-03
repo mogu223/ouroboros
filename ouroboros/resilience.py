@@ -101,8 +101,9 @@ class GlobalApiHealth:
     def record_global_failure(self, errors=None):
         self.global_blocked_until = time.time() + 60.0
     def record_failure(self, error: str = ""):
-        # Alias for some calls
         self.record_global_failure([error])
+    def record_success(self):
+        self.global_blocked_until = None
 
 class IterationGuardian:
     _instance = None
