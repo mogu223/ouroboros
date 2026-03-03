@@ -1,7 +1,16 @@
 """
-Resilience module: Circuit breaker and graceful degradation for LLM API failures.
+Resilience module: Circuit breaker, global API health, and graceful degradation.
 
 Prevents cascading failures and death during API fluctuations.
+
+Key components:
+- CircuitBreaker: Per-model circuit breaker (block failing models)
+- GlobalApiHealth: System-wide cooldown when ALL models fail
+- IterationGuardian: Prevents infinite iteration loops
+
+When all models are unavailable, GlobalApiHealth triggers a global cooldown
+to prevent death-by-retry-loops. The system will wait before trying again,
+rather than spinning indefinitely.
 """
 
 import os
@@ -149,6 +158,120 @@ class CircuitBreaker:
                 log.info("CircuitBreaker: all models reset")
 
 
+class GlobalApiHealth:
+    """
+    Singleton that tracks when ALL models are failing.
+    
+    When all fallback attempts fail, triggers a global cooldown to prevent
+    the system from entering a death spiral of infinite retries.
+    
+    This is the last line of defense - when triggered, the system will:
+    1. Stop all LLM calls for the cooldown period
+    2. Return a graceful degradation message to the user
+    3. Allow manual recovery via force_recover()
+    """
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self.global_blocked_until: Optional[float] = None
+        self.total_global_failures: int = 0
+        self.last_global_failure_time: Optional[float] = None
+        self.last_global_failure_errors: List[str] = []
+        self._state_lock = threading.Lock()
+        self.cooldown = float(os.environ.get("OUROBOROS_GLOBAL_COOLDOWN_SEC", "60.0"))
+        self.max_error_history = int(os.environ.get("OUROBOROS_MAX_ERROR_HISTORY", "10"))
+        log.info(f"GlobalApiHealth initialized: cooldown={self.cooldown}s")
+    
+    def record_global_failure(self, errors: List[str] = None):
+        """
+        Record that ALL models failed. Triggers global cooldown.
+        
+        Args:
+            errors: List of error messages from all failed attempts
+        """
+        with self._state_lock:
+            self.total_global_failures += 1
+            self.last_global_failure_time = time.time()
+            self.global_blocked_until = time.time() + self.cooldown
+            
+            if errors:
+                self.last_global_failure_errors = [str(e)[:200] for e in errors[-self.max_error_history:]]
+            else:
+                self.last_global_failure_errors = []
+            
+            log.warning(
+                f"GlobalApiHealth: ALL MODELS FAILED. "
+                f"Global cooldown for {self.cooldown}s. "
+                f"Total global failures: {self.total_global_failures}"
+            )
+    
+    def is_globally_blocked(self) -> bool:
+        """
+        Check if we're in global cooldown mode.
+        
+        Returns:
+            True if ALL LLM calls should be blocked
+        """
+        with self._state_lock:
+            if self.global_blocked_until is None:
+                return False
+            if time.time() >= self.global_blocked_until:
+                # Cooldown expired, allow calls again
+                self.global_blocked_until = None
+                log.info("GlobalApiHealth: cooldown expired, resuming normal operation")
+                return False
+            return True
+    
+    def get_remaining_cooldown(self) -> float:
+        """Get seconds remaining in global cooldown (0 if not blocked)."""
+        with self._state_lock:
+            if self.global_blocked_until is None:
+                return 0.0
+            remaining = self.global_blocked_until - time.time()
+            return max(0.0, remaining)
+    
+    def get_status(self) -> Dict:
+        """Get current global API health status."""
+        with self._state_lock:
+            return {
+                "is_blocked": self.is_globally_blocked(),
+                "remaining_cooldown_sec": self.get_remaining_cooldown(),
+                "total_global_failures": self.total_global_failures,
+                "last_failure_time": self.last_global_failure_time,
+                "recent_errors": self.last_global_failure_errors,
+                "cooldown_sec": self.cooldown,
+            }
+    
+    def force_recover(self):
+        """
+        Manually exit global cooldown. Use when the issue is fixed.
+        """
+        with self._state_lock:
+            self.global_blocked_until = None
+            log.info("GlobalApiHealth: force recovery, global cooldown cleared")
+    
+    def reset(self):
+        """Reset all state."""
+        with self._state_lock:
+            self.global_blocked_until = None
+            self.total_global_failures = 0
+            self.last_global_failure_time = None
+            self.last_global_failure_errors = []
+            log.info("GlobalApiHealth: fully reset")
+
+
 class IterationGuardian:
     """
     Singleton that tracks iteration depth to prevent infinite loops.
@@ -202,6 +325,7 @@ class IterationGuardian:
 # Global accessors
 _circuit_breaker = None
 _iteration_guardian = None
+_global_api_health = None
 
 
 def get_circuit_breaker() -> CircuitBreaker:
@@ -218,3 +342,11 @@ def get_iteration_guardian() -> IterationGuardian:
     if _iteration_guardian is None:
         _iteration_guardian = IterationGuardian()
     return _iteration_guardian
+
+
+def get_global_api_health() -> GlobalApiHealth:
+    """Get the global API health instance."""
+    global _global_api_health
+    if _global_api_health is None:
+        _global_api_health = GlobalApiHealth()
+    return _global_api_health
