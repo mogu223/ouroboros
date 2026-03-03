@@ -171,7 +171,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         model: str,
         tools: Optional[List[Dict[str, Any]]] = None,
-        reasoning_effort: str = "medium",
+        effort: str = "medium",
         max_tokens: int = 16384,
         tool_choice: str = "auto",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -248,7 +248,7 @@ class LLMClient:
         images: List[Dict[str, Any]],
         model: str = "glm-5",
         max_tokens: int = 1024,
-        reasoning_effort: str = "low",
+        effort: str = "low",
     ) -> Tuple[str, Dict[str, Any]]:
         """
         Send a vision query to an LLM. Lightweight — no tools, no loop.
@@ -260,7 +260,7 @@ class LLMClient:
                 - {"base64": "<b64>", "mime": "image/png"} — for base64 images
             model: VLM-capable model ID
             max_tokens: Max response tokens
-            reasoning_effort: Effort level
+            effort: Effort level
 
         Returns:
             (text_response, usage_dict)
@@ -287,7 +287,7 @@ class LLMClient:
             messages=messages,
             model=model,
             tools=None,
-            reasoning_effort=reasoning_effort,
+            effort=reasoning_effort,
             max_tokens=max_tokens,
         )
         text = response_msg.get("content") or ""
