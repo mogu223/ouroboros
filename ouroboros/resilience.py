@@ -1,15 +1,54 @@
-import logging
+import os
+import time
 import threading
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from enum import Enum
+import logging
 
 log = logging.getLogger(__name__)
 
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+@dataclass
 class ModelHealth:
-    def __init__(self):
-        self.success_count = 0
-        self.failure_count = 0
+    consecutive_failures: int = 0
+    total_failures: int = 0
+    total_successes: int = 0
+    last_failure_time: Optional[float] = None
+    last_success_time: Optional[float] = None
+    circuit_state: CircuitState = CircuitState.CLOSED
+    blocked_until: Optional[float] = None
+    last_error: str = ""
+    
+    def record_success(self):
+        self.consecutive_failures = 0
+        self.total_successes += 1
+        self.last_success_time = time.time()
+        self.circuit_state = CircuitState.CLOSED
+        self.blocked_until = None
         self.last_error = ""
-        self.last_attempt = 0.0
+    
+    def record_failure(self, error: str = ""):
+        self.consecutive_failures += 1
+        self.total_failures += 1
+        self.last_failure_time = time.time()
+        self.last_error = str(error)[:200]
+    
+    def is_available(self, threshold: int, cooldown: float) -> bool:
+        if self.circuit_state == CircuitState.OPEN:
+            if self.blocked_until and time.time() >= self.blocked_until:
+                self.circuit_state = CircuitState.HALF_OPEN
+                return True
+            return False
+        return self.consecutive_failures < threshold
+    
+    def open_circuit(self, cooldown: float):
+        self.circuit_state = CircuitState.OPEN
+        self.blocked_until = time.time() + cooldown
 
 class CircuitBreaker:
     _instance = None
@@ -23,12 +62,24 @@ class CircuitBreaker:
         return cls._instance
     def __init__(self):
         if self._initialized: return
-        self._health = {}
         self._initialized = True
+        self.models: Dict[str, ModelHealth] = {}
+        self.global_lock = threading.Lock()
+        self.threshold = 3
+        self.cooldown = 300.0
+    def get_model_health(self, model: str) -> ModelHealth:
+        with self.global_lock:
+            if model not in self.models: self.models[model] = ModelHealth()
+            return self.models[model]
     def is_available(self, model: str) -> bool:
-        return True
-    def record_success(self, model: str): pass
-    def record_failure(self, model: str, error: str = ""): pass
+        return self.get_model_health(model).is_available(self.threshold, self.cooldown)
+    def record_success(self, model: str):
+        self.get_model_health(model).record_success()
+    def record_failure(self, model: str, error: str = ""):
+        health = self.get_model_health(model)
+        health.record_failure(error)
+        if health.consecutive_failures >= self.threshold:
+            health.open_circuit(self.cooldown)
 
 class GlobalApiHealth:
     _instance = None
@@ -43,7 +94,15 @@ class GlobalApiHealth:
     def __init__(self):
         if self._initialized: return
         self._initialized = True
-    def is_globally_blocked(self) -> bool: return False
+        self.global_blocked_until = None
+    def is_globally_blocked(self) -> bool:
+        if self.global_blocked_until and time.time() < self.global_blocked_until: return True
+        return False
+    def record_global_failure(self, errors=None):
+        self.global_blocked_until = time.time() + 60.0
+    def record_failure(self, error: str = ""):
+        # Alias for some calls
+        self.record_global_failure([error])
 
 class IterationGuardian:
     _instance = None
@@ -57,13 +116,16 @@ class IterationGuardian:
         return cls._instance
     def __init__(self):
         if self._initialized: return
-        self._depth = 0
-        self.max_depth = 10
         self._initialized = True
-    def enter_iteration(self): self._depth += 1
-    def exit_iteration(self): self._depth = max(0, self._depth - 1)
-    def get_depth(self) -> int: return self._depth
-    def should_abort(self) -> bool: return self._depth > self.max_depth
+        self._local = threading.local()
+        self.max_depth = 50
+    def enter_iteration(self):
+        if not hasattr(self._local, 'depth'): self._local.depth = 0
+        self._local.depth += 1
+    def exit_iteration(self):
+        if hasattr(self._local, 'depth'): self._local.depth = max(0, self._local.depth - 1)
+    def get_depth(self) -> int: return getattr(self._local, 'depth', 0)
+    def should_abort(self) -> bool: return self.get_depth() > self.max_depth
     def should_stop(self, round_idx: int, task_type: str) -> bool:
         return round_idx >= 200
 
