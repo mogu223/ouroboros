@@ -155,8 +155,8 @@ if str(ANTHROPIC_API_KEY or "").strip():
 if not pathlib.Path("/content/drive/MyDrive").exists():
     pass
 
-DRIVE_ROOT = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
-REPO_DIR = pathlib.Path("/content/ouroboros_repo").resolve()
+DRIVE_ROOT = pathlib.Path(os.environ.get("OUROBOROS_DRIVE_ROOT", "/content/drive/MyDrive/Ouroboros")).resolve()
+REPO_DIR = pathlib.Path(os.environ.get("OUROBOROS_REPO_DIR", "/content/ouroboros_repo")).resolve()
 
 for sub in ["state", "logs", "memory", "index", "locks", "archive"]:
     (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
