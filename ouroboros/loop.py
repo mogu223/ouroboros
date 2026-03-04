@@ -616,10 +616,12 @@ def run_tool_loop(
     }
     global_health = get_global_api_health()
     # Select reasoning strategy based on task type
+    # Map our task types to reasoning categories expected by get_strategy_for_task
     complexity = "high" if task_type in ("evolution", "review", "code") else "medium"
-    reasoning_strategy = get_strategy_for_task(task_type, complexity)
+    reasoning_category = "code" if task_type in ("evolution", "review", "code") else                          "analysis" if task_type == "task" else                          "simple" if task_type == "message" else "creative"
+    reasoning_strategy = get_strategy_for_task(reasoning_category, complexity)
     llm_trace["reasoning_strategy"] = reasoning_strategy
-    log.info(f"Task type: {task_type}, Reasoning strategy: {reasoning_strategy}")
+    log.info(f"Task: {task_type} -> Category: {reasoning_category}, Strategy: {reasoning_strategy}")
 
     if emit_progress is None:
         emit_progress = lambda _: None
