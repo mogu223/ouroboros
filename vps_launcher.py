@@ -1,5 +1,5 @@
 import logging
-import os, sys, pathlib, time, threading, types
+import os, sys, pathlib, time, threading, types, queue
 
 # --- [1] 环境伪装 ---
 mock_colab = types.ModuleType("google.colab")
@@ -56,25 +56,26 @@ def start_discord_bridge():
             content = message_data.get("content", "")
             user_id = message_data.get("user_id", 0)
             username = message_data.get("username", "unknown")
+            channel_id = message_data.get("channel_id", 0)
             
             log.info(f"📨 Discord message from {username}: {content[:50]}...")
             
-            # 创建一个临时的 chat_id 用于区分 Discord 用户
-            # 格式：-100 + user_id（避免与 Telegram chat_id 冲突）
+            # Discord 用户 ID 转换为内部 chat_id（负数避免与 Telegram 冲突）
             discord_chat_id = -1000000000 - user_id
             
-            # 调用 handle_chat_direct 处理消息
-            # 注意：这是同步调用，需要在线程中运行
-            response_container = {"response": None, "error": None}
+            # 使用队列同步等待响应
+            response_queue = queue.Queue()
             
             def process_message():
                 try:
-                    # 创建一个简单的 agent 来处理消息
                     from ouroboros.agent import make_agent
+                    from ouroboros.utils import utc_now_iso
+                    
+                    # 创建 agent
                     agent = make_agent(
                         repo_dir=str(base_dir),
                         drive_root=str(data_dir),
-                        event_queue=get_event_q()
+                        event_queue=None  # 不发送到主事件队列
                     )
                     
                     # 创建任务
@@ -82,48 +83,65 @@ def start_discord_bridge():
                         "id": f"discord_{user_id}_{int(time.time())}",
                         "type": "task",
                         "chat_id": discord_chat_id,
-                        "text": content,
+                        "text": content + " (Please respond in Chinese)",
                         "source": "discord",
-                        "username": username
+                        "username": username,
+                        "_is_direct_chat": True,
                     }
                     
-                    # 处理任务并收集响应
+                    # 直接调用 agent（不走 event_queue）
                     events = agent.handle_task(task)
+                    
+                    # 从事件中提取最终响应
+                    final_response = None
                     for evt in events:
-                        if evt.get("type") == "response":
-                            response_container["response"] = evt.get("content", "")
-                            break
+                        evt_type = evt.get("type", "")
+                        if evt_type == "progress":
+                            # progress 事件包含中间输出
+                            prog_text = evt.get("text", "")
+                            if prog_text and not prog_text.startswith("Progress:"):
+                                final_response = prog_text
+                        elif evt_type == "response":
+                            final_response = evt.get("content", "")
+                    
+                    response_queue.put(final_response or "🍄 消息已处理。")
+                    
                 except Exception as e:
                     log.error(f"❌ Error processing Discord message: {e}")
-                    response_container["error"] = str(e)
+                    import traceback
+                    log.debug(traceback.format_exc())
+                    response_queue.put(f"⚠️ 处理出错：{type(e).__name__}: {e}")
             
-            # 在线程中处理（避免阻塞 Discord event loop）
+            # 在线程中处理
             thread = threading.Thread(target=process_message, daemon=True)
             thread.start()
-            thread.join(timeout=60)  # 最多等 60 秒
+            thread.join(timeout=120)  # 最多等 2 分钟
             
-            if response_container["error"]:
-                return f"⚠️ 处理出错：{response_container['error']}"
-            
-            return response_container["response"] or "🍄 收到，正在思考..."
+            try:
+                response = response_queue.get_nowait()
+                return response
+            except queue.Empty:
+                return "⏱️ 响应超时，请稍后再试。"
         
         # 创建 bridge
         discord_bridge = create_bridge(callback=discord_callback)
         
-        # 在独立线程中运行（asyncio event loop）
+        # 在独立线程中运行
         def run_bridge():
             try:
                 log.info("🚀 Starting Discord bridge in background thread...")
                 discord_bridge.run()
             except Exception as e:
                 log.error(f"❌ Discord bridge crashed: {e}")
+                import traceback
+                log.debug(traceback.format_exc())
         
         discord_thread = threading.Thread(target=run_bridge, daemon=True)
         discord_thread.start()
         log.info("✅ Discord bridge started")
         
     except Exception as e:
-        log.error(f"⚠️ Failed to start Discord bridge: {e}")
+        log.warning(f"⚠️ Discord bridge not started: {e}")
         import traceback
         log.debug(traceback.format_exc())
 
@@ -158,7 +176,6 @@ while True:
             msg = upd.get("message") or {}
             if msg.get("text"):
                 chat_id = msg['chat']['id']
-                # 强制增加一个唤醒提示，防止模型回空
                 txt = msg['text'] + " (Please respond in Chinese)"
                 threading.Thread(target=handle_chat_direct, args=(chat_id, txt, None), daemon=True).start()
         st = load_state()
