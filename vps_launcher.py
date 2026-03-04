@@ -167,7 +167,7 @@ while True:
             if msg.get("text"):
                 chat_id = msg['chat']['id']
                 txt = msg['text'] + " (Please respond in Chinese)"
-                threading.Thread(target=handle_chat_direct, args=(chat_id, txt, None), daemon=True).start()
+                threading.Thread(target=safe_handle_chat, args=(chat_id, txt, None), daemon=True).start()
         st = load_state()
         st["tg_offset"] = offset
         save_state(st)
