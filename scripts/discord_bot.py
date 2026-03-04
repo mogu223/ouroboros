@@ -45,7 +45,8 @@ intents.guilds = True
 bot = commands.Bot(
     command_prefix="!",
     intents=intents,
-    description="大喷菇 - Ouroboros AI Agent"
+    description="大喷菇 - Ouroboros AI Agent",
+    help_command=None  # Disable default help command
 )
 
 # Whitelist (if OWNER_ID is set)
@@ -128,7 +129,7 @@ async def status(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="help")
+@bot.command(name="帮助")
 async def help_cmd(ctx: commands.Context):
     """Show help message."""
     embed = discord.Embed(
@@ -138,6 +139,7 @@ async def help_cmd(ctx: commands.Context):
     )
     embed.add_field(name="!ping", value="检查延迟", inline=False)
     embed.add_field(name="!status", value="查看状态", inline=False)
+    embed.add_field(name="!帮助", value="显示此帮助", inline=False)
     embed.add_field(name="直接消息或@提及", value="与我对话", inline=False)
     await ctx.send(embed=embed)
 
