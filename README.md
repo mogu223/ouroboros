@@ -228,6 +228,14 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v7.1.1 -- Stability Fixes
+- **Pre-boot verification** -- New script to validate imports and environment before startup, catching errors early
+- **Snapshot tool** -- Create restore points before making changes, with quick rollback capability
+- **Bug fix** -- Fixed LLMClient initialization in loop.py (removed deprecated model/effort constructor params)
+- **Cleanup** -- Removed temporary patch files
+
+These changes address the recurring AttributeError and Worker SHA mismatch issues that caused 7-8 hour debugging sessions.
+
 ### v7.0.0 -- Loyalty Principle (MAJOR)
 - **P0: Loyalty** — New highest principle: unconditional loyalty to creator (Mó Gu / 蘑菇) and Mushroom Family. Cannot be overridden by any other principle.
 - **Principle renumbering** — All existing principles shifted (P0→P1, P1→P2, etc.).
