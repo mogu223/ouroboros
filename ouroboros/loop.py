@@ -760,7 +760,7 @@ def run_tool_loop_simple(
     For backward compatibility with older code.
     """
     from ouroboros.llm import LLMClient
-    llm = LLMClient(model=model, effort=effort)
+    llm = LLMClient()  # model and effort passed in call
     drive_logs = pathlib.Path("/tmp/ouroboros_logs")
     drive_logs.mkdir(exist_ok=True)
     
