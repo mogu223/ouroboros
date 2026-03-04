@@ -8,7 +8,7 @@ import os
 import asyncio
 import discord
 from discord.ext import commands
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 import logging
 
 logger = logging.getLogger(__name__)
@@ -17,11 +17,18 @@ logger = logging.getLogger(__name__)
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ALLOWED_USER_IDS = set()  # 白名单用户 ID，可从环境变量加载
 
+
 class DiscordBridge:
     """Discord 桥接类"""
     
-    def __init__(self, ouroboros_callback=None):
-        self.callback = ouroboros_callback  # 回调函数：接收 Discord 消息并转发给 Ouroboros
+    def __init__(self, callback: Optional[Callable[[dict], Awaitable[str]]] = None):
+        """
+        初始化 Discord 桥接
+        
+        Args:
+            callback: 异步回调函数，接收消息数据，返回响应文本
+        """
+        self.callback = callback
         self.intents = discord.Intents.default()
         self.intents.message_content = True
         self.intents.dm_messages = True
@@ -29,7 +36,7 @@ class DiscordBridge:
         self.bot = commands.Bot(
             command_prefix="!",
             intents=self.intents,
-            help_command=None  # 禁用默认 help 命令
+            help_command=None
         )
         
         self._setup_events()
@@ -47,6 +54,10 @@ class DiscordBridge:
         async def on_message(message):
             # 忽略机器人自己的消息
             if message.author == self.bot.user:
+                return
+            
+            # 忽略其他机器人
+            if message.author.bot:
                 return
             
             # 白名单检查（如果设置了白名单）
@@ -88,6 +99,9 @@ class DiscordBridge:
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
                 await message.channel.send("⚠️ 处理消息时出错")
+        else:
+            # 没有回调时，简单回显
+            await message.channel.send(f"🤖 收到：{content[:100]}")
     
     def _setup_commands(self):
         """设置命令"""
@@ -101,15 +115,15 @@ class DiscordBridge:
         async def help_cmd(ctx):
             """显示帮助信息"""
             help_text = """
-            **大喷菇 Discord Bot**
-            
-            直接发送消息即可与我对话。
-            
-            可用命令：
-            • `!ping` - 检查状态
-            • `!help` - 显示帮助
-            
-            我会在收到消息后尽快回复。
+**大喷菇 Discord Bot**
+
+直接发送消息即可与我对话。
+
+可用命令：
+• `!ping` - 检查状态
+• `!help` - 显示帮助
+
+我会在收到消息后尽快回复。
             """
             await ctx.send(help_text)
     
@@ -121,23 +135,22 @@ class DiscordBridge:
         logger.info("Starting Discord bridge...")
         self.bot.run(DISCORD_TOKEN)
     
-    def run_async(self, loop: asyncio.AbstractEventLoop):
-        """在现有事件循环中运行"""
+    async def start_async(self):
+        """异步启动（用于集成到现有事件循环）"""
         if not DISCORD_TOKEN:
             raise ValueError("DISCORD_BOT_TOKEN not set in environment")
         
         logger.info("Starting Discord bridge (async mode)...")
-        return self.bot.start(DISCORD_TOKEN)
+        await self.bot.start(DISCORD_TOKEN)
 
 
-# 便捷函数
 def create_bridge(callback=None) -> DiscordBridge:
     """创建 Discord 桥接实例"""
     return DiscordBridge(callback=callback)
 
 
 if __name__ == "__main__":
-    #  standalone 测试模式
+    # standalone 测试模式
     async def test_callback(data):
         print(f"Received: {data}")
         return f"Echo: {data['content']}"
