@@ -20,7 +20,7 @@ if raw_pool:
         if "|" in entry:
             u, k = entry.split("|", 1)
             API_POOL.append({"url": u.strip(), "key": k.strip()})
-log.info(f"✅ 已加载 API 节点: {len(API_POOL)} 个")
+log.info(f"✅ API 池: {len(API_POOL)} 组配置已就绪")
 
 # --- [2] 自动清理 Git 锁 ---
 if os.path.exists(f"{base_dir}/.git/index.lock"):
@@ -42,9 +42,9 @@ try:
     w_init(repo_dir=base_dir, drive_root=data_dir, max_workers=2, soft_timeout=600, hard_timeout=1800, total_budget_limit=budget_limit)
 
     def manual_dispatch(evt, ctx):
-        """核心：全量事件监控"""
+        """核心：全量事件分发"""
         etype = evt.get('type')
-        # 只要是回复类事件，无论是 chat_reply 还是任务结果，一律抓取
+        # 捕捉所有回复事件
         if etype in ['chat_reply', 'task_result', 'agent_output']:
             log.info(f"📩 抓取到事件: {etype}")
             content = evt.get('content') or evt.get('result', {}).get('content')
@@ -65,30 +65,31 @@ try:
         append_jsonl=append_jsonl
     )
 except Exception as e:
-    log.error(f"❌ 初始化严重失败: {e}")
+    log.error(f"❌ 初始化崩溃: {e}")
     sys.exit(1)
 
 def smart_chat(cid, txt, img):
     if API_POOL:
         cfg = random.choice(API_POOL)
         os.environ["OPENAI_BASE_URL"], os.environ["OPENAI_API_KEY"] = cfg["url"], cfg["key"]
-        log.info(f"🔄 路由切换 -> {cfg['url']}")
+        log.info(f"🔄 路由切换: {cfg['url']}")
     if handle_chat_direct:
-        # 给 Agent 明确指令：不要进化，直接说话
-        handle_chat_direct(cid, f"{txt}\n(请直接用中文回答，不要调用工具)", img)
+        # 强制要求直接回答，不要乱跑工具
+        handle_chat_direct(cid, f"{txt}\n(请直接用中文简短回答，不要调用工具)", img)
 
-log.info("🚀 Ouroboros 终极版启动，正在监听...")
+log.info("🚀 Ouroboros 终极版启动，正在监听 Telegram...")
 spawn_workers(2)
 restore_pending_from_snapshot()
 offset = int(load_state().get("tg_offset") or 0)
 
 while True:
     try:
-        # 消息回显的关键循环
+        # 处理事件队列 (回显消息的关键)
         eq = get_event_q()
         while not eq.empty():
             manual_dispatch(eq.get_nowait(), _ctx)
         
+        # 轮询消息
         updates = TG.get_updates(offset=offset, timeout=5)
         for upd in updates:
             offset = int(upd["update_id"]) + 1
@@ -99,5 +100,5 @@ while True:
         st = load_state(); st["tg_offset"] = offset; save_state(st)
         time.sleep(0.5)
     except Exception as e:
-        log.error(f"⚠️ 循环异常: {e}")
+        log.error(f"⚠️ 运行时循环异常: {e}")
         time.sleep(1)
