@@ -1,8 +1,7 @@
-# Communication channels for Ouroboros
 """
-Channel modules bridge external platforms to the Ouroboros agent.
+Channels package — Multi-platform communication bridges.
+"""
 
-Currently supported:
-- Telegram (primary)
-- Discord (secondary)
-"""
+from .discord_bridge import DiscordBridge
+
+__all__ = ['DiscordBridge']
