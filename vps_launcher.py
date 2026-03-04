@@ -44,10 +44,33 @@ try:
         spawn_workers=spawn_workers, sort_pending=sort_pending
     )
 except Exception as e:
-    log.error(f"❌ 启动加载失败: {e}")
+    log.error(f"❌ 启动加载失败：{e}")
     sys.exit(1)
 
-# --- [3] 启动循环 ---
+# --- [3] 启动 Discord Bridge (可选) ---
+try:
+    discord_token = os.environ.get("DISCORD_BOT_TOKEN")
+    if discord_token:
+        log.info("🎮 检测到 Discord Token，启动 Discord Bridge...")
+        from ouroboros.channels.discord_bridge import create_bridge
+        
+        # 在独立线程中运行 Discord bot
+        def run_discord():
+            try:
+                bridge = create_bridge()
+                bridge.run()
+            except Exception as e:
+                log.error(f"❌ Discord Bridge 崩溃：{e}")
+        
+        discord_thread = threading.Thread(target=run_discord, daemon=True)
+        discord_thread.start()
+        log.info("✅ Discord Bridge 已启动")
+    else:
+        log.info("🎮 Discord Token 未设置，跳过 Discord Bridge")
+except Exception as e:
+    log.warning(f"⚠️ Discord Bridge 启动失败：{e}")
+
+# --- [4] 启动循环 ---
 log.info("🚀 Ouroboros 生产环境已就绪...")
 spawn_workers(2)
 restore_pending_from_snapshot()
@@ -74,5 +97,5 @@ while True:
         save_state(st)
         time.sleep(0.5)
     except Exception as e:
-        log.error(f"⚠️ 运行时异常: {e}")
+        log.error(f"⚠️ 运行时异常：{e}")
         time.sleep(1)
