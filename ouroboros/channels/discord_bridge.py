@@ -11,11 +11,24 @@ from discord.ext import commands
 from typing import Optional, Callable, Awaitable
 import logging
 from pathlib import Path
+import threading
+import uuid
 
 logger = logging.getLogger(__name__)
 
 # 配置文件路径
 CONFIG_FILE = Path("/opt/ouroboros/.env.discord")
+
+# Supervisor 引用（运行时注入）
+_supervisor_refs = {
+    "handle_chat": None,
+    "send_message": None,
+}
+
+def inject_supervisor_refs(handle_chat_fn, send_message_fn):
+    """注入 supervisor 的函数引用"""
+    _supervisor_refs["handle_chat"] = handle_chat_fn
+    _supervisor_refs["send_message"] = send_message_fn
 
 def load_config():
     """从配置文件加载 Token 和白名单"""
@@ -37,7 +50,6 @@ def load_config():
                     elif key == "DISCORD_OWNER_ID":
                         config["allowed_users"].add(int(value))
                     elif key == "DISCORD_ALLOWED_USERS":
-                        # 支持逗号分隔的多个用户 ID
                         for uid in value.split(","):
                             uid = uid.strip()
                             if uid:
@@ -54,14 +66,7 @@ ALLOWED_USER_IDS = CONFIG["allowed_users"]
 class DiscordBridge:
     """Discord 桥接类"""
     
-    def __init__(self, callback: Optional[Callable[[dict], Awaitable[str]]] = None):
-        """
-        初始化 Discord 桥接
-        
-        Args:
-            callback: 异步回调函数，接收消息数据，返回响应文本
-        """
-        self.callback = callback
+    def __init__(self):
         self.intents = discord.Intents.default()
         self.intents.message_content = True
         self.intents.dm_messages = True
@@ -98,7 +103,7 @@ class DiscordBridge:
             if message.author.bot:
                 return
             
-            # 白名单检查（如果设置了白名单）
+            # 白名单检查
             if ALLOWED_USER_IDS and message.author.id not in ALLOWED_USER_IDS:
                 logger.warning(f"🚫 Blocked message from unauthorized user: {message.author} ({message.author.id})")
                 return
@@ -117,33 +122,43 @@ class DiscordBridge:
         
         logger.info(f"📨 Message from {username} ({user_id}) in {channel_type}: {content[:50]}...")
         
-        # 如果有回调，转发给 Ouroboros
-        if self.callback:
+        # 使用 supervisor 的处理函数（如果有）
+        handle_chat_fn = _supervisor_refs.get("handle_chat")
+        
+        if handle_chat_fn:
             try:
-                response = await self.callback({
-                    "type": "discord_message",
-                    "content": content,
-                    "channel_type": channel_type,
-                    "guild_id": guild_id,
-                    "channel_id": channel_id,
-                    "user_id": user_id,
-                    "username": username,
-                    "message_id": message.id
-                })
+                # 构造一个临时的 chat_id（Discord 用户 ID + 特殊前缀）
+                temp_chat_id = f"discord_{user_id}"
                 
-                # 发送响应回 Discord
-                if response:
-                    # Discord 消息限制 2000 字符
-                    if len(response) > 2000:
-                        for i in range(0, len(response), 1900):
-                            await message.channel.send(response[i:i+1900])
-                    else:
-                        await message.channel.send(response)
+                # 在后台线程中处理（避免阻塞 Discord 事件循环）
+                response_container = {"response": None, "error": None}
+                
+                def process_message():
+                    try:
+                        # 调用 supervisor 的 handle_chat_direct
+                        handle_chat_fn(
+                            chat_id=temp_chat_id,
+                            text=content,
+                            image_data=None
+                        )
+                        # 等待响应（通过事件队列）
+                        # 这里简化处理：直接回复"收到"，实际响应由事件系统异步发送
+                        response_container["response"] = None
+                    except Exception as e:
+                        response_container["error"] = str(e)
+                
+                # 先回复"收到"
+                await message.channel.send("🍄 收到，正在处理...")
+                
+                # 启动后台处理
+                thread = threading.Thread(target=process_message, daemon=True)
+                thread.start()
+                
             except Exception as e:
                 logger.error(f"❌ Error processing message: {e}")
-                await message.channel.send("⚠️ 处理消息时出错")
+                await message.channel.send(f"⚠️ 处理消息时出错：{e}")
         else:
-            # 没有回调时，简单回显
+            # 没有 supervisor 时，简单回显
             await message.channel.send(f"🍄 收到：{content[:100]}")
     
     def _setup_commands(self):
@@ -159,10 +174,10 @@ class DiscordBridge:
             """显示详细状态"""
             status_text = f"""🟢 **大喷菇 Discord Bot**
             
-📡 状态: 在线
-⏱️ 延迟: {round(self.bot.latency * 1000)}ms
-🏠 服务器数: {len(self.bot.guilds)}
-🔐 模式: {"白名单" if ALLOWED_USER_IDS else "公开"}
+📡 状态：在线
+⏱️ 延迟：{round(self.bot.latency * 1000)}ms
+🏠 服务器数：{len(self.bot.guilds)}
+🔐 模式：{"白名单" if ALLOWED_USER_IDS else "公开"}
             """
             await ctx.send(status_text)
         
@@ -192,7 +207,7 @@ class DiscordBridge:
         self.bot.run(DISCORD_TOKEN)
     
     async def start_async(self):
-        """异步启动（用于集成到现有事件循环）"""
+        """异步启动"""
         if not DISCORD_TOKEN:
             raise ValueError("DISCORD_BOT_TOKEN not set")
         
@@ -204,20 +219,15 @@ class DiscordBridge:
         await self.bot.close()
 
 
-def create_bridge(callback=None) -> DiscordBridge:
+def create_bridge() -> DiscordBridge:
     """创建 Discord 桥接实例"""
-    return DiscordBridge(callback=callback)
+    return DiscordBridge()
 
 
 if __name__ == "__main__":
-    # standalone 测试模式
     print(f"Discord Bridge - Standalone Mode")
     print(f"Token loaded: {'Yes' if DISCORD_TOKEN else 'No'}")
     print(f"Allowed users: {ALLOWED_USER_IDS if ALLOWED_USER_IDS else 'All'}")
     
-    async def test_callback(data):
-        print(f"Received: {data}")
-        return f"🍄 Echo: {data['content']}"
-    
-    bridge = create_bridge(callback=test_callback)
+    bridge = create_bridge()
     bridge.run()
