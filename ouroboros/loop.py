@@ -618,7 +618,7 @@ def run_tool_loop(
     # Select reasoning strategy based on task type
     # Map our task types to reasoning categories expected by get_strategy_for_task
     complexity = "high" if task_type in ("evolution", "review", "code") else "medium"
-    reasoning_category = "code" if task_type in ("evolution", "review", "code") else                          "analysis" if task_type == "task" else                          "simple" if task_type == "message" else "creative"
+    reasoning_category = "code" if task_type in ("evolution", "review", "code") else "analysis" if task_type == "task" else "simple" if task_type == "message" else "creative"
     reasoning_strategy = get_strategy_for_task(reasoning_category, complexity)
     llm_trace["reasoning_strategy"] = reasoning_strategy
     log.info(f"Task: {task_type} -> Category: {reasoning_category}, Strategy: {reasoning_strategy}")
