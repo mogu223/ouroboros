@@ -115,7 +115,7 @@ class ToolRegistry:
                 mod = importlib.import_module(f"ouroboros.tools.{modname}")
                 if hasattr(mod, "get_tools"):
                     for entry in mod.get_tools():
-                        self._entries[entry.name] = entry
+                        self._entries[entry['name'] if isinstance(entry, dict) else entry.name] = entry
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -126,7 +126,7 @@ class ToolRegistry:
 
     def register(self, entry: ToolEntry) -> None:
         """Register a new tool (for extension by Ouroboros)."""
-        self._entries[entry.name] = entry
+        self._entries[entry['name'] if isinstance(entry, dict) else entry.name] = entry
 
     # --- Contract ---
 
