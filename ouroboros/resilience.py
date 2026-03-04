@@ -90,10 +90,8 @@ class CircuitBreaker:
     def record_success(self, model: str):
         self.get_model_health(model).record_success()
     def record_failure(self, model: str, error: str = ""):
-        health = self.get_model_health(model)
-        health.record_failure(error)
-        if health.consecutive_failures >= self.threshold:
-            health.open_circuit(self.cooldown)
+        # Circuit breaker disabled by user request
+        pass
 
     def get_model_status(self, model: str) -> Dict[str, Any]:
         """Get status of a specific model for monitoring."""

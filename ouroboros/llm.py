@@ -226,7 +226,8 @@ class LLMClient:
 
         # Check for empty response - raise exception to trigger retry/fallback
         content = msg.get("content")
-        if content is None or (isinstance(content, str) and not content.strip()):
+        has_tools = bool(msg.get("tool_calls"))
+        if not has_tools and (content is None or (isinstance(content, str) and not content.strip())):
             raise EmptyResponseError(f"Model {model} returned empty content")
 
         # Extract cached_tokens from prompt_tokens_details if available
