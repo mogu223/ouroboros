@@ -24,6 +24,7 @@ from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
 from ouroboros.resilience import get_circuit_breaker, get_iteration_guardian, get_global_api_health
 from ouroboros.config import get_fallback_models
+from ouroboros.reasoning import enhanced_reasoning, get_strategy_for_task, parse_json_from_text
 
 
 log = logging.getLogger(__name__)
@@ -614,9 +615,15 @@ def run_tool_loop(
         "models_tried": [active_model],
     }
     global_health = get_global_api_health()
+    # Select reasoning strategy based on task type
+    complexity = "high" if task_type in ("evolution", "review", "code") else "medium"
+    reasoning_strategy = get_strategy_for_task(task_type, complexity)
+    llm_trace["reasoning_strategy"] = reasoning_strategy
+    log.info(f"Task type: {task_type}, Reasoning strategy: {reasoning_strategy}")
 
     if emit_progress is None:
         emit_progress = lambda _: None
+
 
     try:
         for round_idx in range(max_rounds):
@@ -630,11 +637,31 @@ def run_tool_loop(
                     f"Stopping to prevent infinite loop. Please simplify your request.",
                 ), accumulated_usage, llm_trace
 
-            # Call LLM with retry
-            msg, cost = _call_llm_with_retry(
-                llm, messages, active_model, tool_schemas, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type
-            )
+            # Call LLM with retry (or enhanced reasoning for first round of complex tasks)
+            if round_idx == 0 and reasoning_strategy != 'simple':
+                # Use enhanced reasoning for complex tasks on first round
+                def llm_adapter(msgs, model=None, reasoning_effort=None, max_tokens=None):
+                    try:
+                        resp, usage = llm.call(messages=msgs, model=model or active_model, tools=None, effort=reasoning_effort or active_effort)
+                        return resp, usage
+                    except Exception:
+                        return {'content': ''}, {}
+                
+                question = ''
+                for m in reversed(messages):
+                    if m.get('role') == 'user':
+                        question = m.get('content', '')[:2000]
+                        break
+                
+                if question:
+                    log.info(f'Using enhanced reasoning: {reasoning_strategy}')
+                    answer, conf, meta = enhanced_reasoning(llm_adapter, question, model=active_model, strategy=reasoning_strategy, samples=2)
+                    msg = {'content': answer, 'tool_calls': []}
+                    cost = 0.05
+                else:
+                    msg, cost = _call_llm_with_retry(llm, messages, active_model, tool_schemas, active_effort, max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type)
+            else:
+                msg, cost = _call_llm_with_retry(llm, messages, active_model, tool_schemas, active_effort, max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type)
 
             # Fallback logic: try ALL available fallback models before giving up
             if msg is None:
