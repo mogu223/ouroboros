@@ -4,7 +4,7 @@ Discord Bot Bridge for Ouroboros
 Provides Discord channel integration with the following features:
 - Message routing between Discord and Ouroboros
 - Owner-only access control
-- Persistent message queue
+- Direct LLM integration with Chinese response enforcement
 
 Usage:
     python -m ouroboros.channels.discord_bot
@@ -28,7 +28,6 @@ from discord.ext import commands
 DATA_DIR = Path("/opt/ouroboros/data")
 SECRETS_DIR = DATA_DIR / "secrets"
 TOKEN_FILE = SECRETS_DIR / "discord_token.env"
-MESSAGE_QUEUE = DATA_DIR / "discord_queue.jsonl"
 OWNER_STATE = DATA_DIR / "state" / "state.json"
 
 # Bot intents
@@ -36,6 +35,16 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.messages = True
 intents.dm_messages = True
+
+
+# Load LLM client
+try:
+    from ouroboros.llm import LLMClient
+    llm_client = LLMClient()
+    print("[Discord] ✅ LLM client loaded")
+except Exception as e:
+    print(f"[Discord] ⚠️ Could not load LLM client: {e}")
+    llm_client = None
 
 
 class OuroborosDiscordBot(commands.Bot):
@@ -92,35 +101,75 @@ class OuroborosDiscordBot(commands.Bot):
         # Log incoming message
         print(f"[Discord] 📥 From {message.author} (ID: {message.author.id}): {content[:100]}...")
         
-        # Save to queue for Ouroboros to process
-        await self._queue_message(
-            discord_user_id=str(message.author.id),
-            discord_user_name=str(message.author),
-            content=content,
-            channel_id=str(message.channel.id),
-            is_dm=is_dm
-        )
-        
-        # Send acknowledgment
-        await message.reply("收到，正在处理...", mention_author=False)
+        # Send typing indicator
+        async with message.channel.typing():
+            # Call LLM directly
+            response = await self._call_llm(content, message.author)
+            
+            # Send response back to Discord
+            if response:
+                # Split long responses into multiple messages
+                max_length = 1900
+                chunks = [response[i:i+max_length] for i in range(0, len(response), max_length)]
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await message.reply(chunk, mention_author=False)
+                    else:
+                        await message.channel.send(chunk)
+            else:
+                await message.reply("⚠️ 处理失败，请稍后再试", mention_author=False)
     
-    async def _queue_message(self, discord_user_id: str, discord_user_name: str, 
-                             content: str, channel_id: str, is_dm: bool):
-        """Queue message for Ouroboros to process."""
-        entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "discord_user_id": discord_user_id,
-            "discord_user_name": discord_user_name,
-            "content": content,
-            "channel_id": channel_id,
-            "is_dm": is_dm,
-            "processed": False
-        }
+    async def _call_llm(self, user_message: str, user: discord.User) -> Optional[str]:
+        """Call LLM and get Chinese response."""
+        if llm_client is None:
+            return "⚠️ LLM 客户端未初始化"
         
-        with open(MESSAGE_QUEUE, 'a') as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        # Build prompt with Chinese enforcement
+        system_prompt = """你是在 Discord 上提供服务的 AI 助手"大喷菇"。
+
+重要要求：
+1. **必须用中文回复**（除非用户明确要求其他语言）
+2. 回复要简洁、友好、有帮助
+3. 如果不确定，诚实说明
+4. 不要提及你是 AI 或机器人，自然对话即可
+
+用户消息："""
         
-        print(f"[Discord] ✅ Queued message from {discord_user_name}")
+        try:
+            print(f"[Discord] 🔄 Calling LLM for user {user}...")
+            
+            # Call LLM synchronously (run in executor to not block)
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: llm_client.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message}
+                    ],
+                    model="kimi-k2.5"  # Use stable model
+                )
+            )
+            
+            # Extract content from response
+            if response and isinstance(response, dict):
+                content = response.get("content", "")
+                if content:
+                    print(f"[Discord] ✅ Got response ({len(content)} chars)")
+                    return content.strip()
+                else:
+                    # Check for reasoning_content (Qwen thinking models)
+                    reasoning = response.get("reasoning_content", "")
+                    if reasoning:
+                        print(f"[Discord] ⚠️ Got reasoning but no content")
+                        return "⚠️ 思考中，请稍后..."
+            
+            print(f"[Discord] ⚠️ Empty response from LLM")
+            return None
+            
+        except Exception as e:
+            print(f"[Discord] ❌ LLM call failed: {e}")
+            return f"⚠️ 处理出错：{str(e)[:100]}"
 
 
 def load_token() -> str:
@@ -147,9 +196,6 @@ def main():
     except Exception as e:
         print(f"[Discord] ❌ Failed to load token: {e}")
         sys.exit(1)
-    
-    # Ensure queue file exists
-    MESSAGE_QUEUE.touch(exist_ok=True)
     
     # Create and run bot
     bot = OuroborosDiscordBot()
