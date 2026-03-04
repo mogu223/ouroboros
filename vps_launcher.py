@@ -68,43 +68,33 @@ def start_discord_bridge():
             
             def process_message():
                 try:
-                    from ouroboros.agent import make_agent
-                    from ouroboros.utils import utc_now_iso
+                    # 直接使用现有的 handle_chat_direct 函数
+                    # 它会通过事件队列异步处理，我们需要监听响应
                     
-                    # 创建 agent
-                    agent = make_agent(
-                        repo_dir=str(base_dir),
-                        drive_root=str(data_dir),
-                        event_queue=None  # 不发送到主事件队列
+                    # 创建一个临时的响应监听器
+                    from ouroboros.memory import read_scratchpad, update_scratchpad
+                    
+                    # 简单方案：直接调用 LLM（绕过复杂的 agent 系统）
+                    from ouroboros.llm import call_llm
+                    
+                    # 读取系统提示
+                    bible_path = base_dir / "BIBLE.md"
+                    system_prompt = "你是大喷菇，蘑菇家族的 AI Agent。用中文回复。"
+                    if bible_path.exists():
+                        system_prompt = bible_path.read_text()[:2000] + "\n\n你是大喷菇，用中文回复。"
+                    
+                    # 调用 LLM
+                    response = call_llm(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": content + "\n\n请用中文简洁回复。"}
+                        ],
+                        model=os.environ.get("OUROBOROS_MODEL", "kimi-k2.5"),
+                        temperature=0.7,
+                        max_tokens=1000
                     )
                     
-                    # 创建任务
-                    task = {
-                        "id": f"discord_{user_id}_{int(time.time())}",
-                        "type": "task",
-                        "chat_id": discord_chat_id,
-                        "text": content + " (Please respond in Chinese)",
-                        "source": "discord",
-                        "username": username,
-                        "_is_direct_chat": True,
-                    }
-                    
-                    # 直接调用 agent（不走 event_queue）
-                    events = agent.handle_task(task)
-                    
-                    # 从事件中提取最终响应
-                    final_response = None
-                    for evt in events:
-                        evt_type = evt.get("type", "")
-                        if evt_type == "progress":
-                            # progress 事件包含中间输出
-                            prog_text = evt.get("text", "")
-                            if prog_text and not prog_text.startswith("Progress:"):
-                                final_response = prog_text
-                        elif evt_type == "response":
-                            final_response = evt.get("content", "")
-                    
-                    response_queue.put(final_response or "🍄 消息已处理。")
+                    response_queue.put(response or "🍄 消息已处理。")
                     
                 except Exception as e:
                     log.error(f"❌ Error processing Discord message: {e}")
