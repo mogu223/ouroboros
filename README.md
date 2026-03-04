@@ -228,6 +228,12 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v7.1.2 -- Enhanced Reasoning Integration
+- **Reasoning enhancement** -- Integrated Tree-of-Thoughts, self-consistency voting, and reflection for complex tasks
+- **Adaptive reasoning** -- Automatically selects reasoning strategy based on task type (evolution/review → reflect_vote, task → vote, message → simple)
+- **Cost-efficient** -- Simple tasks use single-pass baseline, complex tasks get enhanced reasoning
+- **Strategy mapping** -- evolution/review/code → reflect_vote, task → vote, message → simple
+
 ### v7.1.1 -- Stability Fixes
 - **Pre-boot verification** -- New script to validate imports and environment before startup, catching errors early
 - **Snapshot tool** -- Create restore points before making changes, with quick rollback capability
