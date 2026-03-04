@@ -115,7 +115,7 @@ class ToolRegistry:
                 mod = importlib.import_module(f"ouroboros.tools.{modname}")
                 if hasattr(mod, "get_tools"):
                     for entry in mod.get_tools():
-                        self._entries[entry['name'] if isinstance(entry, dict) else entry.name] = entry
+                        self._entries[entry['name'] if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name)] = entry
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -126,7 +126,7 @@ class ToolRegistry:
 
     def register(self, entry: ToolEntry) -> None:
         """Register a new tool (for extension by Ouroboros)."""
-        self._entries[entry['name'] if isinstance(entry, dict) else entry.name] = entry
+        self._entries[entry['name'] if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name)] = entry
 
     # --- Contract ---
 
@@ -156,7 +156,7 @@ class ToolRegistry:
         """Return the full schema for a specific tool."""
         entry = self._entries.get(name)
         if entry:
-            return {"type": "function", "function": entry.schema}
+            return {"type": "function", "function": (entry.get("schema") if isinstance(entry, dict) else entry.schema)}
         return None
 
     def get_timeout(self, name: str) -> int:
@@ -180,8 +180,8 @@ class ToolRegistry:
         entry = self._entries.get(name)
         if entry:
             self._entries[name] = ToolEntry(
-                name=entry.name,
-                schema=entry.schema,
+                name=(entry.get("name") if isinstance(entry, dict) else entry.name),
+                schema=(entry.get("schema") if isinstance(entry, dict) else entry.schema),
                 handler=handler,
                 timeout_sec=entry.timeout_sec,
             )
