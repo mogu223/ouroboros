@@ -1,34 +1,37 @@
 import logging
-import os, sys, pathlib, time, threading, types, builtins, typing
+import os, sys, pathlib, time, threading, types, builtins, typing, random
 
-# --- [0] 暴力注入：解决类型标注错误 ---
+# --- [0] 类型注入 ---
 for name in ['Any', 'Dict', 'List', 'Optional', 'Set', 'Tuple', 'Union', 'Iterable', 'Callable']:
-    try:
-        setattr(builtins, name, getattr(typing, name))
+    try: setattr(builtins, name, getattr(typing, name))
     except: pass
 
-# --- [1] 环境伪装 ---
-mock_colab = types.ModuleType("google.colab")
-mock_colab.userdata = types.SimpleNamespace(get=lambda x: os.environ.get(x))
-sys.modules["google.colab"] = mock_colab
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-log = logging.getLogger("OuroborosVPS")
+log = logging.getLogger("OuroborosFinal")
 base_dir = pathlib.Path("/opt/ouroboros").resolve()
 sys.path.insert(0, str(base_dir))
 data_dir = base_dir / "data"
 
-# --- [2] 动态探测导入逻辑 ---
-def dynamic_import(module_name, func_name):
-    """尝试从多个可能的模块中抓取函数"""
-    search_paths = [module_name, 'supervisor.workers', 'supervisor.queue', 'supervisor.events']
-    for path in search_paths:
+# --- [1] API 资源池解析 ---
+raw_pool = os.environ.get("API_POOL", "")
+API_POOL = []
+if raw_pool:
+    for entry in raw_pool.split(","):
+        if "|" in entry:
+            u, k = entry.split("|", 1)
+            API_POOL.append({"url": u.strip(), "key": k.strip()})
+log.info(f"✅ 已加载 API 池: {len(API_POOL)} 组配置")
+
+# --- [2] 动态寻找失踪的函数 (解决 ImportError) ---
+def find_func(func_name):
+    # 搜索所有可能的模块
+    for mod_name in ['supervisor.events', 'supervisor.workers', 'supervisor.queue', 'supervisor.telegram']:
         try:
-            mod = __import__(path, fromlist=[func_name])
-            func = getattr(mod, func_name, None)
-            if func:
-                log.info(f"🔍 在 {path} 中找到了 {func_name}")
-                return func
+            mod = __import__(mod_name, fromlist=[func_name])
+            f = getattr(mod, func_name, None)
+            if f:
+                log.info(f"🔍 找到函数 {func_name} -> {mod_name}")
+                return f
         except: continue
     return None
 
@@ -39,16 +42,11 @@ try:
     from supervisor.queue import restore_pending_from_snapshot, enqueue_task, cancel_task_by_id, queue_review_task, persist_queue_snapshot, sort_pending
     from supervisor.git_ops import safe_restart
     
-    # 核心：动态探测 dispatch_event
-    dispatch_event = dynamic_import('supervisor.events', 'dispatch_event')
-    if not dispatch_event:
-        # 如果实在找不到，定义一个空函数防止崩溃
-        log.warning("⚠️ 警告：找不到 dispatch_event，已使用空函数替代")
-        dispatch_event = lambda evt, ctx: log.debug(f"Dropped event: {evt}")
-
+    # 动态抓取核心分发函数
+    dispatch_event = find_func('dispatch_event') or (lambda e, c: log.warning(f"Event dropped: {e}"))
+    
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     budget_limit = float(os.environ.get("TOTAL_BUDGET", "500000"))
-    
     s_init(data_dir, budget_limit)
     init_state()
     TG = TelegramClient(token)
@@ -56,46 +54,39 @@ try:
     w_init(repo_dir=base_dir, drive_root=data_dir, max_workers=2, soft_timeout=600, hard_timeout=1800, total_budget_limit=budget_limit)
 
     _ctx = types.SimpleNamespace(
-        DRIVE_ROOT=data_dir, REPO_DIR=base_dir, TG=TG,
-        WORKERS=WORKERS, PENDING=PENDING, RUNNING=RUNNING,
-        MAX_WORKERS=2, send_with_budget=send_with_budget,
-        load_state=load_state, save_state=save_state,
-        update_budget_from_usage=update_budget_from_usage,
-        append_jsonl=append_jsonl, enqueue_task=enqueue_task,
-        cancel_task_by_id=cancel_task_by_id, queue_review_task=queue_review_task,
-        persist_queue_snapshot=persist_queue_snapshot,
-        safe_restart=safe_restart, kill_workers=lambda: None,
-        spawn_workers=spawn_workers, sort_pending=sort_pending
+        DRIVE_ROOT=data_dir, REPO_DIR=base_dir, TG=TG, WORKERS=WORKERS, PENDING=PENDING, RUNNING=RUNNING,
+        MAX_WORKERS=2, send_with_budget=send_with_budget, load_state=load_state, save_state=save_state,
+        update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl, enqueue_task=enqueue_task,
+        cancel_task_by_id=cancel_task_by_id, queue_review_task=queue_review_task, persist_queue_snapshot=persist_queue_snapshot,
+        safe_restart=safe_restart, kill_workers=lambda: None, spawn_workers=spawn_workers, sort_pending=sort_pending
     )
 except Exception as e:
-    log.error(f"❌ 启动加载失败: {e}")
-    import traceback
-    traceback.print_exc()
+    log.error(f"❌ 初始化失败: {e}")
     sys.exit(1)
 
-# --- [3] 运行主循环 ---
-log.info("🚀 Ouroboros 动态适配版已启动")
+def smart_chat(cid, txt, img):
+    if API_POOL:
+        cfg = random.choice(API_POOL)
+        os.environ["OPENAI_BASE_URL"], os.environ["OPENAI_API_KEY"] = cfg["url"], cfg["key"]
+        log.info(f"🔄 路由: {cfg['url']}")
+    if handle_chat_direct: handle_chat_direct(cid, txt + "\n(Reply in Chinese)", img)
+
+log.info("🚀 Ouroboros 生产环境已就绪...")
 spawn_workers(2)
 restore_pending_from_snapshot()
-
 offset = int(load_state().get("tg_offset") or 0)
+
 while True:
     try:
         eq = get_event_q()
-        while not eq.empty():
-            dispatch_event(eq.get_nowait(), _ctx)
-
+        while not eq.empty(): dispatch_event(eq.get_nowait(), _ctx)
         updates = TG.get_updates(offset=offset, timeout=5)
         for upd in updates:
             offset = int(upd["update_id"]) + 1
             msg = upd.get("message") or {}
             if msg.get("text"):
-                threading.Thread(target=handle_chat_direct, args=(msg['chat']['id'], msg['text'], None), daemon=True).start()
-        
-        st = load_state()
-        st["tg_offset"] = offset
-        save_state(st)
+                threading.Thread(target=smart_chat, args=(msg['chat']['id'], msg['text'], None), daemon=True).start()
+        st = load_state(); st["tg_offset"] = offset; save_state(st)
         time.sleep(0.5)
     except Exception as e:
-        log.error(f"⚠️ 运行时异常: {e}")
-        time.sleep(1)
+        log.error(f"⚠️ 异常: {e}"); time.sleep(1)
