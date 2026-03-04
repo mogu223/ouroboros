@@ -2,7 +2,7 @@ import os
 import time
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from enum import Enum
 import logging
 
@@ -50,6 +50,20 @@ class ModelHealth:
         self.circuit_state = CircuitState.OPEN
         self.blocked_until = time.time() + cooldown
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize model health status for monitoring."""
+        return {
+            "consecutive_failures": self.consecutive_failures,
+            "total_failures": self.total_failures,
+            "total_successes": self.total_successes,
+            "last_failure_time": self.last_failure_time,
+            "last_success_time": self.last_success_time,
+            "circuit_state": self.circuit_state.value,
+            "is_available": self.is_available(3, 300.0),
+            "blocked_until": self.blocked_until,
+            "last_error": self.last_error,
+        }
+
 class CircuitBreaker:
     _instance = None
     _lock = threading.Lock()
@@ -80,6 +94,23 @@ class CircuitBreaker:
         health.record_failure(error)
         if health.consecutive_failures >= self.threshold:
             health.open_circuit(self.cooldown)
+
+    def get_model_status(self, model: str) -> Dict[str, Any]:
+        """Get status of a specific model for monitoring."""
+        return self.get_model_health(model).to_dict()
+
+    def get_all_status(self) -> Dict[str, Dict[str, Any]]:
+        """Get status of all tracked models for monitoring."""
+        with self.global_lock:
+            return {model: health.to_dict() for model, health in self.models.items()}
+
+    def get_blocked_models(self) -> List[str]:
+        """Get list of currently blocked models."""
+        with self.global_lock:
+            return [
+                model for model, health in self.models.items()
+                if not health.is_available(self.threshold, self.cooldown)
+            ]
 
 class GlobalApiHealth:
     _instance = None
