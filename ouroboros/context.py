@@ -272,6 +272,18 @@ def _build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
+    # 6. Circuit breaker status - show blocked models
+    try:
+        from ouroboros.resilience import get_circuit_breaker
+        cb = get_circuit_breaker()
+        blocked = cb.get_blocked_models()
+        if blocked:
+            checks.append(f"WARNING: CIRCUIT BREAKER — {len(blocked)} model(s) blocked: {', '.join(blocked)}")
+        else:
+            checks.append("OK: all models available")
+    except Exception:
+        pass
+
     if not checks:
         return ""
     return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
