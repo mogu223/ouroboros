@@ -1,0 +1,15 @@
+[Unit]
+Description=Ouroboros Discord Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ouroboros
+EnvironmentFile=/opt/ouroboros/.env.discord
+ExecStart=/opt/ouroboros/.venv/bin/python /opt/ouroboros/scripts/discord_bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
