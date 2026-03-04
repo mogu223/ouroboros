@@ -115,7 +115,7 @@ class ToolRegistry:
                 mod = importlib.import_module(f"ouroboros.tools.{modname}")
                 if hasattr(mod, "get_tools"):
                     for entry in mod.get_tools():
-                        self._entries[entry['name'] if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name))] = entry
+                        self._entries[entry['name'] if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name)))] = entry
             except Exception:
                 import logging
                 logging.getLogger(__name__).warning(
@@ -126,37 +126,37 @@ class ToolRegistry:
 
     def register(self, entry: ToolEntry) -> None:
         """Register a new tool (for extension by Ouroboros)."""
-        self._entries[entry['name'] if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name))] = entry
+        self._entries[entry['name'] if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name)))] = entry
 
     # --- Contract ---
 
     def available_tools(self) -> List[str]:
-        return [(e.get("name") if isinstance(e, dict) else e.name) for e in self._entries.values()]
+        return [(e.get("name") if isinstance(e, dict) else (e.get("name") if isinstance(e, dict) else e.name)) for e in self._entries.values()]
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         if not core_only:
-            return [{"type": "function", "function": (e.get("schema") if isinstance(e, dict) else e.schema)} for e in self._entries.values()]
+            return [{"type": "function", "function": (e.get("schema") if isinstance(e, dict) else (e.get("schema") if isinstance(e, dict) else e.schema))} for e in self._entries.values()]
         # Core tools + meta-tools for discovering/enabling extended tools
         result = []
         for e in self._entries.values():
-            if (e.get("name") if isinstance(e, dict) else e.name) in CORE_TOOL_NAMES or (e.get("name") if isinstance(e, dict) else e.name) in ("list_available_tools", "enable_tools"):
-                result.append({"type": "function", "function": (e.get("schema") if isinstance(e, dict) else e.schema)})
+            if (e.get("name") if isinstance(e, dict) else (e.get("name") if isinstance(e, dict) else e.name)) in CORE_TOOL_NAMES or (e.get("name") if isinstance(e, dict) else (e.get("name") if isinstance(e, dict) else e.name)) in ("list_available_tools", "enable_tools"):
+                result.append({"type": "function", "function": (e.get("schema") if isinstance(e, dict) else (e.get("schema") if isinstance(e, dict) else e.schema))})
         return result
 
     def list_non_core_tools(self) -> List[Dict[str, str]]:
         """Return name+description of all non-core tools."""
         result = []
         for e in self._entries.values():
-            if (e.get("name") if isinstance(e, dict) else e.name) not in CORE_TOOL_NAMES:
-                desc = (e.get("schema") if isinstance(e, dict) else e.schema).get("description", "No description")
-                result.append({"name": (e.get("name") if isinstance(e, dict) else e.name), "description": desc})
+            if (e.get("name") if isinstance(e, dict) else (e.get("name") if isinstance(e, dict) else e.name)) not in CORE_TOOL_NAMES:
+                desc = (e.get("schema") if isinstance(e, dict) else (e.get("schema") if isinstance(e, dict) else e.schema)).get("description", "No description")
+                result.append({"name": (e.get("name") if isinstance(e, dict) else (e.get("name") if isinstance(e, dict) else e.name)), "description": desc})
         return result
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         entry = self._entries.get(name)
         if entry:
-            return {"type": "function", "function": (entry.get("schema") if isinstance(entry, dict) else (entry.get("schema") if isinstance(entry, dict) else entry.schema))}
+            return {"type": "function", "function": (entry.get("schema") if isinstance(entry, dict) else (entry.get("schema") if isinstance(entry, dict) else (entry.get("schema") if isinstance(entry, dict) else entry.schema)))}
         return None
 
     def get_timeout(self, name: str) -> int:
@@ -180,12 +180,12 @@ class ToolRegistry:
         entry = self._entries.get(name)
         if entry:
             self._entries[name] = ToolEntry(
-                name=(entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name)),
-                schema=(entry.get("schema") if isinstance(entry, dict) else (entry.get("schema") if isinstance(entry, dict) else entry.schema)),
+                name=(entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else (entry.get("name") if isinstance(entry, dict) else entry.name))),
+                schema=(entry.get("schema") if isinstance(entry, dict) else (entry.get("schema") if isinstance(entry, dict) else (entry.get("schema") if isinstance(entry, dict) else entry.schema))),
                 handler=handler,
                 timeout_sec=entry.timeout_sec,
             )
 
     @property
     def CODE_TOOLS(self) -> frozenset:
-        return frozenset((e.get("name") if isinstance(e, dict) else e.name) for e in self._entries.values() if e.is_code_tool)
+        return frozenset((e.get("name") if isinstance(e, dict) else (e.get("name") if isinstance(e, dict) else e.name)) for e in self._entries.values() if e.is_code_tool)
