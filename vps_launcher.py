@@ -1,7 +1,7 @@
 import logging
 import os, sys, pathlib, time, threading, types, builtins, typing, random
 
-# --- [0] 类型注入 ---
+# --- [0] 类型定义注入 ---
 for name in ['Any', 'Dict', 'List', 'Optional', 'Set', 'Tuple', 'Union', 'Iterable', 'Callable']:
     try: setattr(builtins, name, getattr(typing, name))
     except: pass
@@ -20,9 +20,9 @@ if raw_pool:
         if "|" in entry:
             u, k = entry.split("|", 1)
             API_POOL.append({"url": u.strip(), "key": k.strip()})
-log.info(f"✅ API 池已就绪: {len(API_POOL)} 组配置")
+log.info(f"✅ API 池加载完成: {len(API_POOL)} 组配置")
 
-# --- [2] 初始化核心 ---
+# --- [2] 初始化与手动分发器 ---
 try:
     from supervisor.state import init as s_init, init_state, load_state, save_state, append_jsonl
     from supervisor.telegram import init as t_init, TelegramClient, send_with_budget
@@ -37,17 +37,18 @@ try:
     t_init(drive_root=data_dir, total_budget_limit=budget_limit, budget_report_every=5, tg_client=TG)
     w_init(repo_dir=base_dir, drive_root=data_dir, max_workers=2, soft_timeout=600, hard_timeout=1800, total_budget_limit=budget_limit)
 
-    # --- [关键：手动重建传令逻辑] ---
     def manual_dispatch(evt, ctx):
-        """如果底层 dispatch_event 丢了，我们直接处理最关键的回复事件"""
         etype = evt.get('type')
         if etype == 'chat_reply':
-            log.info(f"📤 正在通过 Telegram 发送回复...")
-            ctx.send_with_budget(evt['chat_id'], evt['content'])
+            log.info(f"📤 正在回传消息到 Telegram...")
+            try:
+                # 兼容不同版本的发送函数名
+                sender = getattr(ctx, 'send_with_budget', send_with_budget)
+                sender(evt['chat_id'], evt['content'])
+            except Exception as e:
+                log.error(f"❌ 发送失败: {e}")
         elif etype == 'typing_start':
             ctx.TG.send_chat_action(evt['chat_id'], 'typing')
-        else:
-            log.debug(f"ℹ️ 忽略次要事件: {etype}")
 
     _ctx = types.SimpleNamespace(
         DRIVE_ROOT=data_dir, REPO_DIR=base_dir, TG=TG, WORKERS=WORKERS, PENDING=PENDING, RUNNING=RUNNING,
@@ -55,7 +56,7 @@ try:
         append_jsonl=append_jsonl
     )
 except Exception as e:
-    log.error(f"❌ 初始化失败: {e}")
+    log.error(f"❌ 初始化崩溃: {e}")
     sys.exit(1)
 
 def smart_chat(cid, txt, img):
@@ -64,10 +65,9 @@ def smart_chat(cid, txt, img):
         os.environ["OPENAI_BASE_URL"], os.environ["OPENAI_API_KEY"] = cfg["url"], cfg["key"]
         log.info(f"🔄 路由切换: {cfg['url']}")
     if handle_chat_direct:
-        # 强制增加后缀，诱导模型避开空回复
-        handle_chat_direct(cid, txt + "\n(请简短地用中文回复我)", img)
+        handle_chat_direct(cid, txt + "\n(Reply in Chinese, be brief)", img)
 
-log.info("🚀 Ouroboros 核心逻辑已重组，启动监听...")
+log.info("🚀 Ouroboros 核心就绪，开始处理请求...")
 spawn_workers(2)
 restore_pending_from_snapshot()
 offset = int(load_state().get("tg_offset") or 0)
@@ -88,5 +88,5 @@ while True:
         st = load_state(); st["tg_offset"] = offset; save_state(st)
         time.sleep(0.5)
     except Exception as e:
-        log.error(f"⚠️ 运行时异常: {e}")
+        log.error(f"⚠️ 运行时循环异常: {e}")
         time.sleep(1)
