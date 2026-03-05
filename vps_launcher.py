@@ -6,7 +6,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 log = logging.getLogger("Ouroboros")
 base_dir = pathlib.Path("/opt/ouroboros").resolve()
 sys.path.insert(0, str(base_dir))
-data_dir = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()\n    os.environ["OUROBOROS_DRIVE_ROOT"] = str(data_dir)
+data_dir = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
+os.environ["OUROBOROS_DRIVE_ROOT"] = str(data_dir)
 from supervisor.state import load_state, save_state
 from supervisor.telegram import TelegramClient, init as t_init
 from supervisor.workers import spawn_workers, get_event_q, handle_chat_direct
@@ -15,11 +16,8 @@ token = os.environ.get("TELEGRAM_BOT_TOKEN")
 budget = float(os.environ.get("TOTAL_BUDGET", "500000"))
 TG = TelegramClient(token)
 def dispatch(evt, ctx):
-    msg = evt.get("text") or evt.get("content") or evt.get("result", {}).get("content")
-    cid = evt.get("chat_id") or evt.get("result", {}).get("chat_id")
-    if msg and cid:
-        log.info(f"📤 发送回复到：{cid}")
-        ctx.send_with_budget(cid, msg)
+    from supervisor.events import dispatch_event
+    dispatch_event(evt, ctx)
 
 # Discord Bridge 初始化
 DISCORD_ENABLED = False
