@@ -66,16 +66,41 @@ def _handle_typing_start(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     try:
+        chat_id_raw = evt.get("chat_id")
+        text = str(evt.get("text") or "")
         log_text = evt.get("log_text")
         fmt = str(evt.get("format") or "")
         is_progress = bool(evt.get("is_progress"))
-        ctx.send_with_budget(
-            int(evt["chat_id"]),
-            str(evt.get("text") or ""),
-            log_text=(str(log_text) if isinstance(log_text, str) else None),
-            fmt=fmt,
-            is_progress=is_progress,
-        )
+        
+        # Check if this is a Discord message
+        if isinstance(chat_id_raw, str) and chat_id_raw.startswith("discord_"):
+            # Discord message
+            try:
+                user_id = int(chat_id_raw.replace("discord_", ""))
+                from ouroboros.channels.discord_bridge import send_discord_message
+                ok = send_discord_message(user_id, text)
+                if not ok:
+                    log.warning(f"Failed to send Discord message to {user_id}")
+            except Exception as discord_err:
+                log.error(f"Discord send error: {discord_err}")
+                ctx.append_jsonl(
+                    ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                    {
+                        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        "type": "discord_send_error",
+                        "user_id": chat_id_raw,
+                        "error": repr(discord_err),
+                    },
+                )
+        else:
+            # Telegram message (original behavior)
+            ctx.send_with_budget(
+                int(chat_id_raw),
+                text,
+                log_text=(str(log_text) if isinstance(log_text, str) else None),
+                fmt=fmt,
+                is_progress=is_progress,
+            )
     except Exception as e:
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
