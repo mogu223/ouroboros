@@ -12,7 +12,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.0.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+**Version:** 7.1.3 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
 ---
 
