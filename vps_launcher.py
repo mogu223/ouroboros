@@ -18,8 +18,51 @@ def dispatch(evt, ctx):
     msg = evt.get("text") or evt.get("content") or evt.get("result", {}).get("content")
     cid = evt.get("chat_id") or evt.get("result", {}).get("chat_id")
     if msg and cid:
-        log.info(f"📤 发送回复到: {cid}")
+        log.info(f"📤 发送回复到：{cid}")
         ctx.send_with_budget(cid, msg)
+
+# Discord Bridge 初始化
+DISCORD_ENABLED = False
+try:
+    discord_config_path = pathlib.Path("/opt/ouroboros/.env.discord")
+    if discord_config_path.exists():
+        discord_token = None
+        discord_owner_id = None
+        with open(discord_config_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DISCORD_BOT_TOKEN="):
+                    discord_token = line.split("=", 1)[1].strip()
+                elif line.startswith("DISCORD_OWNER_ID="):
+                    discord_owner_id = line.split("=", 1)[1].strip()
+        
+        if discord_token:
+            log.info("Discord configuration found, initializing bridge...")
+            os.environ["DISCORD_BOT_TOKEN"] = discord_token
+            if discord_owner_id:
+                os.environ["DISCORD_OWNER_ID"] = discord_owner_id
+            
+            from ouroboros.channels.discord_bridge import DiscordBridge
+            
+            def start_discord_bot():
+                try:
+                    bridge = DiscordBridge()
+                    bridge.run()
+                except Exception as e:
+                    log.error(f"Discord bot error: {e}", exc_info=True)
+            
+            discord_thread = threading.Thread(target=start_discord_bot, daemon=True, name="DiscordBridge")
+            discord_thread.start()
+            DISCORD_ENABLED = True
+            log.info("✅ Discord bridge started in background thread")
+        else:
+            log.info("Discord token not found in config, Discord bridge disabled")
+    else:
+        log.info("Discord config file not found, Discord bridge disabled")
+except Exception as e:
+    log.warning(f"Failed to initialize Discord bridge: {e}")
+    DISCORD_ENABLED = False
+
 _ctx = types.SimpleNamespace(DRIVE_ROOT=data_dir, REPO_DIR=base_dir, TG=TG, MAX_WORKERS=2, send_with_budget=TG.send_message, load_state=load_state, save_state=save_state)
 s_init(data_dir, budget); init_state()
 t_init(drive_root=data_dir, total_budget_limit=budget, budget_report_every=5, tg_client=TG)
