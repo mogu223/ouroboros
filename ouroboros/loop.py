@@ -642,9 +642,9 @@ def run_tool_loop(
             # Call LLM with retry (or enhanced reasoning for first round of complex tasks)
             if round_idx == 0 and reasoning_strategy != 'simple':
                 # Use enhanced reasoning for complex tasks on first round
-                def llm_adapter(msgs, model=None, reasoning_effort=None, max_tokens=None):
+                def llm_adapter(messages, model=None, reasoning_effort=None, max_tokens=None):
                     try:
-                        resp, usage = llm.call(messages=msgs, model=model or active_model, tools=None, effort=reasoning_effort or active_effort)
+                        resp, usage = llm.call(messages=messages, model=model or active_model, tools=None, effort=reasoning_effort or active_effort)
                         return resp, usage
                     except Exception:
                         return {'content': ''}, {}

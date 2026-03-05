@@ -198,8 +198,28 @@ class DiscordBridge:
                 logger.warning(f"🚫 Blocked message from unauthorized user: {message.author} ({message.author.id})")
                 return
             
+            # 只在私聊或者被 @ 时回复
+            is_dm = isinstance(message.channel, discord.DMChannel)
+            is_mentioned = _discord_bot.user in message.mentions
+            if not is_dm and not is_mentioned:
+                return
+                
+            # 处理消息 (去掉提及机器人的文本)
+            content = message.content
+            if is_mentioned:
+                content = content.replace(f"<@{_discord_bot.user.id}>", "").strip()
+                content = content.replace(f"<@!{_discord_bot.user.id}>", "").strip()
+            
+            # Create a mock message object with cleaned content
+            class CleanMessage:
+                pass
+            clean_msg = CleanMessage()
+            clean_msg.content = content
+            clean_msg.author = message.author
+            clean_msg.channel = message.channel
+            
             # 处理消息
-            await self._handle_message(message)
+            await self._handle_message(clean_msg)
     
     async def _handle_message(self, message):
         """处理收到的消息"""
