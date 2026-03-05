@@ -1,3 +1,18 @@
+"""
+Supervisor — Event handlers.
+
+Handles events from workers: send_message, progress, tool calls, etc.
+"""
+
+from __future__ import annotations
+
+import datetime
+import logging
+from typing import Any, Dict
+
+log = logging.getLogger(__name__)
+
+
 def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     """Handle send_message event for both Telegram and Discord.
     
@@ -6,7 +21,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         chat_id_raw = evt.get("chat_id")
         text = str(evt.get("text") or "")
-        log_text = evt.get("log_text")
+        log_text = str(evt.get("log_text") if evt.get("log_text") is not None else "")
         fmt = str(evt.get("format") or "")
         is_progress = bool(evt.get("is_progress"))
         
@@ -18,10 +33,10 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
                 from ouroboros.channels.discord_bridge import send_discord_message
                 ok = send_discord_message(user_id, text)
                 if not ok:
-                    log.warning(f"Failed to send Discord message to {user_id}")
+                    log.warning("Failed to send Discord message to %s", user_id)
             except Exception as discord_err:
-                log.error(f"Discord send error: {discord_err}")
-                # Fallback: try to log the error
+                log.error("Discord send error: %s", discord_err)
+                # Fallback: log the error
                 ctx.append_jsonl(
                     ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
                     {
