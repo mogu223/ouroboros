@@ -8,7 +8,6 @@ Usage:
 
 import os
 import sys
-import asyncio
 
 # 添加项目路径
 sys.path.insert(0, "/opt/ouroboros")
@@ -31,22 +30,6 @@ def load_discord_token():
     print("❌ DISCORD_BOT_TOKEN not found in file")
     return None
 
-async def ouroboros_callback(message_data):
-    """
-    处理 Discord 消息的回调函数
-    
-    这里可以集成到 Ouroboros 主循环
-    目前只是简单回显
-    """
-    content = message_data["content"]
-    username = message_data["username"]
-    
-    print(f"📨 [{username}]: {content}")
-    
-    # TODO: 集成到 Ouroboros 主循环
-    # 目前返回简单响应
-    return f"🤖 大喷菇收到消息：{content[:50]}..."
-
 def main():
     print("🚀 Starting Discord Bridge...")
     
@@ -61,7 +44,7 @@ def main():
     # 导入并运行
     from ouroboros.channels.discord_bridge import create_bridge
     
-    bridge = create_bridge(callback=ouroboros_callback)
+    bridge = create_bridge()
     
     print("🟢 Discord bridge started")
     print("Press Ctrl+C to stop")
