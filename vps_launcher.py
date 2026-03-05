@@ -61,7 +61,18 @@ except Exception as e:
     log.warning(f"Failed to initialize Discord bridge: {e}")
     DISCORD_ENABLED = False
 
-_ctx = types.SimpleNamespace(DRIVE_ROOT=data_dir, REPO_DIR=base_dir, TG=TG, MAX_WORKERS=2, send_with_budget=TG.send_message, load_state=load_state, save_state=save_state)
+from supervisor.telegram import send_with_budget
+from supervisor.state import append_jsonl
+_ctx = types.SimpleNamespace(
+    DRIVE_ROOT=data_dir, 
+    REPO_DIR=base_dir, 
+    TG=TG, 
+    MAX_WORKERS=2, 
+    send_with_budget=send_with_budget, 
+    load_state=load_state, 
+    save_state=save_state,
+    append_jsonl=append_jsonl
+)
 # s_init removed
 t_init(drive_root=data_dir, total_budget_limit=budget, budget_report_every=5, tg_client=TG)
 def smart_chat(cid, txt, img):
