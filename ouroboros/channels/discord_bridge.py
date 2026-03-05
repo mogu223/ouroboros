@@ -22,8 +22,9 @@ CONFIG_FILE = Path("/opt/ouroboros/.env.discord")
 
 # 全局状态
 _discord_bot: Optional[commands.Bot] = None
+_bot_event_loop: Optional[asyncio.AbstractEventLoop] = None
+_bot_ready_event = threading.Event()  # 用于等待 bot 就绪
 _pending_responses: Dict[str, asyncio.Future] = {}
-_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 def load_config():
     """从配置文件加载 Token 和白名单"""
@@ -73,13 +74,18 @@ def send_discord_message(user_id: int, text: str) -> bool:
     Returns:
         bool: 是否成功发送
     """
-    global _discord_bot
+    global _discord_bot, _bot_event_loop
     
     if _discord_bot is None:
         logger.warning("Discord bot not initialized")
         return False
     
     if not text:
+        return False
+    
+    # 等待 bot 就绪（最多 5 秒）
+    if not _bot_ready_event.wait(timeout=5.0):
+        logger.error("Discord bot not ready after 5 seconds")
         return False
     
     try:
@@ -119,18 +125,23 @@ def send_discord_message(user_id: int, text: str) -> bool:
             logger.error(f"❌ Could not find user {user_id} in any guild")
             return False
         
-        # 如果已经在事件循环中，创建任务；否则运行新循环
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.run_coroutine_threadsafe(send(), loop)
-            else:
-                loop.run_until_complete(send())
-        except RuntimeError:
-            # 没有事件循环，创建新的
-            asyncio.run(send())
-        
-        return True
+        # 使用 bot 线程的事件循环
+        if _bot_event_loop is not None:
+            # 在 bot 的事件循环中运行协程
+            future = asyncio.run_coroutine_threadsafe(send(), _bot_event_loop)
+            # 等待结果（最多 10 秒）
+            try:
+                return future.result(timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout sending message to {user_id}")
+                return False
+            except Exception as e:
+                logger.error(f"Error in send coroutine: {e}")
+                return False
+        else:
+            logger.error("Bot event loop not initialized")
+            return False
+            
     except Exception as e:
         logger.error(f"❌ Error sending Discord message: {e}")
         return False
@@ -140,7 +151,7 @@ class DiscordBridge:
     """Discord 桥接类"""
     
     def __init__(self):
-        global _discord_bot
+        global _discord_bot, _bot_event_loop
         
         self.intents = discord.Intents.default()
         self.intents.message_content = True
@@ -161,6 +172,10 @@ class DiscordBridge:
         
         @_discord_bot.event
         async def on_ready():
+            global _bot_event_loop, _discord_bot
+            _bot_event_loop = asyncio.get_event_loop()
+            _bot_ready_event.set()  # 标记 bot 已就绪
+            
             logger.info(f"🟢 Discord bot logged in as {_discord_bot.user}")
             logger.info(f"📡 Connected to {len(_discord_bot.guilds)} guilds")
             if ALLOWED_USER_IDS:
@@ -280,6 +295,11 @@ def create_bridge() -> DiscordBridge:
 def get_bot() -> Optional[commands.Bot]:
     """获取 bot 实例"""
     return _discord_bot
+
+
+def is_bot_ready() -> bool:
+    """检查 bot 是否已就绪"""
+    return _bot_ready_event.is_set() and _discord_bot is not None
 
 
 if __name__ == "__main__":
