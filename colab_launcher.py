@@ -210,6 +210,59 @@ telegram_init(
     tg_client=TG,
 )
 
+# ----------------------------
+# 4.1) Initialize Discord Bridge (if configured)
+# ----------------------------
+DISCORD_BRIDGE = None
+DISCORD_ENABLED = False
+
+try:
+    discord_config_path = pathlib.Path("/opt/ouroboros/.env.discord")
+    if discord_config_path.exists():
+        # Parse config file
+        discord_token = None
+        discord_owner_id = None
+        with open(discord_config_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DISCORD_BOT_TOKEN="):
+                    discord_token = line.split("=", 1)[1].strip()
+                elif line.startswith("DISCORD_OWNER_ID="):
+                    discord_owner_id = line.split("=", 1)[1].strip()
+        
+        if discord_token:
+            log.info("Discord configuration found, initializing bridge...")
+            
+            # Set environment variable for discord_bridge module
+            os.environ["DISCORD_BOT_TOKEN"] = discord_token
+            if discord_owner_id:
+                os.environ["DISCORD_OWNER_ID"] = discord_owner_id
+            
+            # Import and initialize Discord bridge
+            from ouroboros.channels.discord_bridge import DiscordBridge
+            
+            # Start Discord bot in background thread
+            def start_discord_bot():
+                try:
+                    bridge = DiscordBridge()
+                    bridge.run()
+                except Exception as e:
+                    log.error(f"Discord bot error: {e}", exc_info=True)
+            
+            discord_thread = threading.Thread(target=start_discord_bot, daemon=True, name="DiscordBridge")
+            discord_thread.start()
+            DISCORD_ENABLED = True
+            log.info("✅ Discord bridge started in background thread")
+        else:
+            log.info("Discord token not found in config, Discord bridge disabled")
+    else:
+        log.info("Discord config file not found (/opt/ouroboros/.env.discord), Discord bridge disabled")
+except Exception as e:
+    log.warning(f"Failed to initialize Discord bridge: {e}")
+    DISCORD_ENABLED = False
+
+
+
 from supervisor.git_ops import (
     init as git_ops_init, ensure_repo_present, checkout_and_reset,
     sync_runtime_dependencies, import_test, safe_restart,
