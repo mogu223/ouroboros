@@ -7,7 +7,7 @@ log = logging.getLogger("Ouroboros")
 base_dir = pathlib.Path("/opt/ouroboros").resolve()
 sys.path.insert(0, str(base_dir))
 data_dir = base_dir / "data"
-from supervisor.state import init as s_init, init_state, load_state, save_state
+from supervisor.state import load_state, save_state
 from supervisor.telegram import TelegramClient, init as t_init
 from supervisor.workers import spawn_workers, get_event_q, handle_chat_direct
 from supervisor.queue import restore_pending_from_snapshot
@@ -64,7 +64,7 @@ except Exception as e:
     DISCORD_ENABLED = False
 
 _ctx = types.SimpleNamespace(DRIVE_ROOT=data_dir, REPO_DIR=base_dir, TG=TG, MAX_WORKERS=2, send_with_budget=TG.send_message, load_state=load_state, save_state=save_state)
-s_init(data_dir, budget); init_state()
+# s_init removed
 t_init(drive_root=data_dir, total_budget_limit=budget, budget_report_every=5, tg_client=TG)
 def smart_chat(cid, txt, img):
     if os.environ.get("API_POOL"):
