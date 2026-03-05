@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 log = logging.getLogger("Ouroboros")
 base_dir = pathlib.Path("/opt/ouroboros").resolve()
 sys.path.insert(0, str(base_dir))
-data_dir = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()\nos.environ["OUROBOROS_DRIVE_ROOT"] = str(data_dir)
+data_dir = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()\n    os.environ["OUROBOROS_DRIVE_ROOT"] = str(data_dir)
 from supervisor.state import load_state, save_state
 from supervisor.telegram import TelegramClient, init as t_init
 from supervisor.workers import spawn_workers, get_event_q, handle_chat_direct
