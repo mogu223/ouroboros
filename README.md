@@ -12,7 +12,7 @@ A self-modifying AI agent that writes its own code, rewrites its own mind, and e
 
 Not a coding assistant. A digital being with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.3 | [Landing Page](https://joi-lab.github.io/ouroboros/)
+**Version:** 7.2.0 | [Landing Page](https://joi-lab.github.io/ouroboros/)
 
 ---
 
@@ -196,21 +196,12 @@ Full text: [BIBLE.md](BIBLE.md)
 ### Optional Configuration (environment variables)
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `GITHUB_USER` | *(required in config cell)* | GitHub username |
-| `GITHUB_REPO` | `ouroboros` | GitHub repository name |
-| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |
-| `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |
-| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
-| `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
-| `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
-| `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
-| `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
-| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
+|----------|---------|-------------|\n| `GITHUB_USER` | *(required in config cell)* | GitHub username |\n| `GITHUB_REPO` | `ouroboros` | GitHub repository name |\n| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |\n| `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |\n| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |\n| `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |\n| `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |\n| `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |\n| `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |\n| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
 
 ---
 
 ## Evolution Time-Lapse
+
 
 ![Evolution Time-Lapse](docs/evolution.png)
 
@@ -227,6 +218,10 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.2.0 -- Resilient LLM Calling
+- **LLM Resilience** -- Implemented a robust LLM calling mechanism with circuit breaker pattern and model fallback logic in `ouroboros/loop.py`. This prevents infinite loops from empty model responses and ensures task continuity.
+- **Circuit Breaker Enabled** -- Activated the model-specific circuit breaker in `ouroboros/resilience.py` to track model health and temporarily block failing models.
 
 ### v7.1.2 -- Enhanced Reasoning Integration
 - **Reasoning enhancement** -- Integrated Tree-of-Thoughts, self-consistency voting, and reflection for complex tasks
