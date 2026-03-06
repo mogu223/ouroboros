@@ -311,6 +311,7 @@ def main() -> None:
         tg_client=tg,
     )
 
+    sup_workers.spawn_workers(MAX_WORKERS)
     event_q = sup_workers.get_event_q()
     consciousness = BackgroundConsciousness(
         drive_root=DRIVE_ROOT,
@@ -319,8 +320,6 @@ def main() -> None:
         owner_chat_id_fn=_owner_chat_id,
     )
     ctx = _make_context(tg, consciousness)
-
-    sup_workers.spawn_workers(MAX_WORKERS)
     restored = sup_queue.restore_pending_from_snapshot()
 
     st = load_state()
@@ -390,6 +389,11 @@ def main() -> None:
                     },
                 )
                 sup_workers.spawn_workers(MAX_WORKERS)
+                event_q = sup_workers.get_event_q()
+                try:
+                    consciousness._event_queue = event_q
+                except Exception:
+                    pass
 
             sup_workers.ensure_workers_healthy()
             sup_queue.enforce_task_timeouts()
