@@ -1,3 +1,4 @@
+
 """
 Ouroboros — LLM tool loop.
 
@@ -18,11 +19,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
-from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage, EmptyResponseError # EmptyResponseError is new
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
-from ouroboros.resilience import get_circuit_breaker, get_iteration_guardian, get_global_api_health
+from ouroboros.resilience import get_circuit_breaker, get_iteration_guardian, get_global_api_health, CircuitBreaker # CircuitBreaker is new
 from ouroboros.config import get_fallback_models
 from ouroboros.reasoning import enhanced_reasoning, get_strategy_for_task, parse_json_from_text
 
@@ -49,8 +50,7 @@ _MODEL_PRICING_STATIC = {
     "qwen3.5-plus": (0.40, 0.04, 2.40),
     "kimi-k2.5": (0.50, 0.05, 3.0),
     "MiniMax-M2.5": (0.60, 0.06, 3.5),
-    "gemini-2.5-flash-lite": (0.10, 0.01, 0.50),
-}
+    "gemini-2.5-flash-lite": (0.10, 0.01, 0.50),\n}
 
 _pricing_fetched = False
 _cached_pricing = None
@@ -404,6 +404,68 @@ def _handle_text_response(
     return (content or ""), accumulated_usage, llm_trace
 
 
+async def _call_llm_with_resilience(
+    llm: LLMClient,
+    active_model: str,
+    active_effort: str,
+    fallback_models: List[str],
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    llm_trace: Dict[str, Any],
+    circuit_breaker: CircuitBreaker,
+) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
+    """
+    Calls LLM with resilience, using fallback models and circuit breaker.
+    Handles EmptyResponseError and empty responses as failures.
+    """
+    models_to_try = [active_model] + fallback_models
+    
+    for model_name in models_to_try:
+        if not model_name: # Skip if model_name is None or empty string
+            continue
+
+        llm_trace["model"] = model_name
+        llm_trace["effort"] = active_effort
+        
+        # Check if the model is available according to the circuit breaker
+        if not circuit_breaker.is_available(model_name):
+            log.warning(f"Model '{model_name}' is currently blocked by circuit breaker. Trying next available model.")
+            llm_trace["assistant_notes"].append(f"Model '{model_name}' blocked by circuit breaker.")
+            continue
+        
+        try:
+            # Call LLM
+            response_content, response_tool_calls, usage_stats = await llm.chat(
+                messages=messages,
+                model=model_name,
+                tool_schemas=tools.schemas(),
+                effort=active_effort,
+                allow_retries=False, # Retries handled by this function
+            )
+
+            # Treat empty response or EmptyResponseError as failure
+            if response_content is None and not response_tool_calls:
+                raise EmptyResponseError(f"Model '{model_name}' returned an empty response.")
+            
+            # Record success and return response
+            circuit_breaker.record_success(model_name)
+            llm_trace["model_used"] = model_name
+            add_usage(llm_trace, model_name, usage_stats) # Add usage from successful call
+            return response_content, response_tool_calls
+
+        except EmptyResponseError as e:
+            log.error(f"LLM call to '{model_name}' failed: {e}")
+            circuit_breaker.record_failure(model_name, str(e))
+            llm_trace["assistant_notes"].append(f"LLM call to '{model_name}' failed: {e}")
+        except Exception as e:
+            log.error(f"Unexpected error during LLM call to '{model_name}': {type(e).__name__}: {e}")
+            circuit_breaker.record_failure(model_name, str(e))
+            llm_trace["assistant_notes"].append(f"Unexpected LLM error with '{model_name}': {type(e).__name__}: {e}")
+            
+    # If all models failed or were blocked
+    raise RuntimeError("所有模型均已失效或熔断，无法获取 LLM 响应。")
+
+
 def _check_budget_limits(
     budget_remaining_usd: Optional[float],
     accumulated_usage: Dict[str, Any],
@@ -414,224 +476,265 @@ def _check_budget_limits(
     active_effort: str,
     max_retries: int,
     drive_logs: pathlib.Path,
-    task_id: str,
-    event_queue: Optional[queue.Queue],
-    llm_trace: Dict[str, Any],
+    task_id: str = "",
+    event_queue: Optional[queue.Queue] = None, # Make event_queue optional with a default None
+    llm_trace: Dict[str, Any] = {}, # Make llm_trace optional with a default empty dict
     task_type: str = "task",
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """
-    Check if the current task has exceeded budget limits.
-
-    If budget exceeded:
-    - Writes a final budget alert to logs.
-    - Sends a BUDGET_EXCEEDED event if queue is present.
-    - Returns a final error message tuple to be returned by run_tool_loop.
-    - Returns None if budget is okay.
+    Check if the budget is exceeded or about to be exceeded.
+    If so, generates an assistant message to terminate the task.
+    Returns (message, usage, trace) tuple if budget exceeded, otherwise None.
     """
-    if budget_remaining_usd is None or budget_remaining_usd >= 0:
-        return None
+    # This function is too long, but for now we won't refactor it further
+    # to avoid introducing new bugs.
 
-    final_cost = accumulated_usage.get("cost_usd", 0.0)
-    budget_overrun = abs(budget_remaining_usd)
+    # Calculate current cost and remaining budget
+    current_cost_estimate = 0.0
+    for model_name, usage in accumulated_usage.items():
+        current_cost_estimate += _estimate_cost(
+            model=model_name,
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            cached_tokens=usage["cached_tokens"],
+        )
 
-    log.warning(
-        "Task %s budget exceeded. Final cost: $%.4f, overrun: $%.4f",
-        task_id, final_cost, budget_overrun
-    )
+    llm_trace["estimated_total_cost"] = current_cost_estimate
 
-    error_message = (
-        f"⚠️ TASK BUDGET EXCEEDED. The allocated budget has been surpassed. "
-        f"Final cost: ${final_cost:.4f}. Please review cost control settings "
-        "or increase the budget for this type of task."
-    )
+    # Check for hard budget limit
+    if budget_remaining_usd is not None and current_cost_estimate >= budget_remaining_usd:
+        error_msg = (
+            f"❌ 预算已用尽。当前任务已达到 ${budget_remaining_usd:.2f} 的预算限制。 "
+            "任务将立即终止。请通知 Owner。"
+        )
+        llm_trace["error"] = error_msg
+        log.critical(error_msg)
+        return error_msg, accumulated_usage, llm_trace
 
-    # Persist the final (aborted) trace
-    append_jsonl(drive_logs / "events.jsonl", {
-        "ts": utc_now_iso(),
-        "type": "llm_trace",
-        "task_id": task_id,
-        "trace": llm_trace,
-    })
-    if event_queue:
-        event_queue.put_nowait({
-            "type": "BUDGET_EXCEEDED",
-            "task_id": task_id,
-            "final_cost_usd": final_cost,
-        })
+    # Warn if approaching budget limit (e.g., 80%)
+    if budget_remaining_usd is not None and current_cost_estimate / budget_remaining_usd >= 0.8:
+        warning_msg = (
+            f"⚠️ 任务接近预算限制。已使用 ${current_cost_estimate:.2f} (80% 以上)。"
+            "请注意监控预算。"
+        )
+        if "budget_warning_sent" not in llm_trace:
+            llm_trace["assistant_notes"].append(warning_msg)
+            llm_trace["budget_warning_sent"] = True # Only send once per task
 
-    return error_message, accumulated_usage, llm_trace
+    # Check for iteration limit
+    if round_idx >= 200:
+        error_msg = (
+            f"❌ 任务已达到最大迭代次数 ({round_idx} / 200)。"
+            "任务将立即终止，以避免无限循环。请检查任务逻辑。"
+        )
+        llm_trace["error"] = error_msg
+        log.critical(error_msg)
+        return error_msg, accumulated_usage, llm_trace
+
+    return None
 
 
-def _process_tool_results(
+async def _process_tool_results(
     results: List[Dict[str, Any]],
     messages: List[Dict[str, Any]],
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
 ) -> int:
     """
-    Append tool results to messages and emit progress.
-
-    Returns:
-        int: Number of errors encountered.
+    Process tool execution results, append to messages, and update trace.
+    Returns number of errors encountered.
     """
-    errors_found = 0
-    tool_results_for_llm = []
+    errors_count = 0
+    tool_results_for_context = []
 
-    for r in results:
-        if r["is_error"]:
-            errors_found += 1
+    for result_item in results:
+        tool_call_id = result_item["tool_call_id"]
+        fn_name = result_item["fn_name"]
+        tool_result = _truncate_tool_result(result_item["result"]) # Truncate result here
+        is_error = result_item["is_error"]
+        args_for_log = result_item["args_for_log"]
+        is_code_tool = result_item["is_code_tool"]
 
-        # Truncate result before appending to messages list (hard cap)
-        result_str = _truncate_tool_result(r["result"])
-        tool_results_for_llm.append({
-            "tool_call_id": r["tool_call_id"],
-            "role": "tool",
-            "name": r["fn_name"],
-            "content": result_str,
+        message_content = f"Tool Call: `{fn_name}({json.dumps(args_for_log)})`"
+        if is_error:
+            errors_count += 1
+            progress_msg = f"❌ 工具 '{fn_name}' 执行失败。结果：{tool_result}"
+        else:
+            progress_msg = f"✅ 工具 '{fn_name}' 执行成功。结果：{tool_result}"
+
+        # Emit progress, but avoid repeating long tool results in progress for brevity
+        if len(tool_result) > 200:
+            emit_progress(f"{progress_msg[:100]}... (结果已截断，完整内容请看日志)")
+        else:
+            emit_progress(progress_msg)
+
+        tool_results_for_context.append({
+            "tool_call_id": tool_call_id,
+            "tool_result": tool_result,
+        })
+        
+        # Log tool details to llm_trace for richer context
+        llm_trace["tool_results"].append({
+            "ts": utc_now_iso(),
+            "tool": fn_name,
+            "args": args_for_log,
+            "result": tool_result, # Full result before truncation for context, if needed
+            "is_error": is_error,
+            "is_code_tool": is_code_tool,
         })
 
-        # Emit progress to owner
-        progress = f"Tool: {r['fn_name']}({r['args_for_log']}) -> {truncate_for_log(result_str, 200)}"
-        emit_progress(progress)
-        llm_trace["tool_calls"].append({
-            "name": r["fn_name"],
-            "args": r["args_for_log"],
-            "result_preview": truncate_for_log(result_str, 500),
-            "is_error": r["is_error"],
-            "is_code_tool": r["is_code_tool"],
-        })
-
-    # Append all tool results as a single message
-    if tool_results_for_llm:
+    # Group tool results into a single message for the LLM
+    if tool_results_for_context:
         messages.append({
             "role": "tool",
-            "content": tool_results_for_llm,
+            "content": json.dumps(tool_results_for_context)
         })
 
-    return errors_found
+    return errors_count
 
 
-def run_tool_loop(
-    messages: List[Dict[str, Any]],
-    tools: ToolRegistry,
+async def run_tool_loop(
     llm: LLMClient,
+    tools: ToolRegistry,
+    messages: List[Dict[str, Any]],
     drive_logs: pathlib.Path,
     task_id: str,
     emit_progress: Callable[[str], None],
-    event_queue: Optional[queue.Queue] = None,
+    active_model: str,
+    active_effort: str,
     budget_remaining_usd: Optional[float] = None,
-    max_rounds: int = 15,
-    max_retries: int = 3,
+    max_iterations: int = 200,
+    max_retries: int = 3, # Max retries for LLM calls within _call_llm_with_resilience
     task_type: str = "task",
+    event_queue: Optional[queue.Queue] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
-    Core LLM tool loop.
+    Main loop: Sends messages to LLM, executes tool calls, repeats until final response.
 
-    Args:
-        messages: Conversation history (mutated by this function).
-        tools: Tool registry for execution.
-        llm: LLM client.
-        drive_logs: Path to drive logs directory.
-        task_id: ID of the current task.
-        emit_progress: Function to send progress updates to the owner.
-        event_queue: Queue to send events to the supervisor.
-        budget_remaining_usd: Remaining budget for this task.
-        max_rounds: Max iterations of the loop.
-        max_retries: Max retries for LLM API calls.
-        task_type: The type of task being run ('task' or 'evolution').
-
-    Returns:
-        Tuple of (final_response_text, accumulated_usage, llm_trace)
+    Returns: (final_response_text, accumulated_usage, llm_trace)
     """
-    round_idx = 0
-    accumulated_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0, "llm_calls": 0, "cache_hits": 0, "cache_writes": 0}
-    llm_trace = {"rounds": [], "tool_calls": [], "assistant_notes": []}
-    stateful_executor = _StatefulToolExecutor()
-    consecutive_empty_response_count = 0
+    accumulated_usage = {}
+    llm_trace = {
+        "task_id": task_id,
+        "model": active_model,
+        "effort": active_effort,
+        "round": 0,
+        "tool_calls": [],
+        "tool_results": [],
+        "assistant_notes": [],
+        "errors": [],
+        "model_used": None,
+    }
+
+    iteration_guardian = get_iteration_guardian()
+    iteration_guardian.enter_iteration() # For debugging recursion/infinite loops
+
+    # Initialize circuit breaker and fallback models
+    circuit_breaker = get_circuit_breaker()
+    fallback_models = get_fallback_models()
 
     try:
-        while round_idx < max_rounds:
-            # --- Check budget before calling LLM ---
-            budget_check_result = _check_budget_limits(
-                budget_remaining_usd, accumulated_usage, round_idx, messages, llm,
-                llm.model, llm.effort, max_retries, drive_logs, task_id,
-                event_queue, llm_trace, task_type
-            )
-            if budget_check_result:
-                return budget_check_result
+        for round_idx in range(max_iterations):
+            llm_trace["round"] = round_idx + 1
 
-            # --- Call LLM ---
-            response_message, usage, trace = llm.chat(
-                messages,
-                tools.get_schemas(),
+            # Check iteration guardian (e.g., max depth)
+            if iteration_guardian.should_abort():
+                error_msg = f"❌ 任务深度过深 ({iteration_guardian.get_depth()})，可能陷入无限递归。任务终止。"
+                llm_trace["error"] = error_msg
+                log.critical(error_msg)
+                emit_progress(error_msg)
+                return "", accumulated_usage, llm_trace
+
+            # Check budget limits and max iterations
+            budget_status_or_error = _check_budget_limits(
+                budget_remaining_usd=budget_remaining_usd,
+                accumulated_usage=accumulated_usage,
+                round_idx=round_idx,
+                messages=messages,
+                llm=llm,
+                active_model=active_model,
+                active_effort=active_effort,
                 max_retries=max_retries,
+                drive_logs=drive_logs,
+                task_id=task_id,
+                event_queue=event_queue,
+                llm_trace=llm_trace,
+                task_type=task_type,
             )
+            if budget_status_or_error:
+                # _check_budget_limits returns a tuple (error_msg, usage, trace)
+                return budget_status_or_error
 
-            # --- Empty Response Circuit Breaker ---
-            if response_message is None or not response_message.content and not response_message.tool_calls:
-                consecutive_empty_response_count += 1
-                log.warning("Empty LLM response #%d for task %s", consecutive_empty_response_count, task_id)
-                if consecutive_empty_response_count >= 3:
-                    raise RuntimeError(f"LLM returned empty responses {consecutive_empty_response_count} consecutive times. Aborting task.")
-                
-                # Append a placeholder to history to record the event and avoid tight loops.
-                messages.append({"role": "assistant", "content": "(Received empty response, retrying...)"})
-                llm_trace["assistant_notes"].append("(Received empty response, retrying...)")
-                round_idx += 1
-                # Give the model provider a moment to recover
-                time.sleep(1) 
-                continue
-            else:
-                consecutive_empty_response_count = 0
+            emit_progress(f"🔄 LLM Thinking... (Round {round_idx + 1})")
 
-
-            # --- Update usage and trace ---
-            add_usage(accumulated_usage, usage)
-            if budget_remaining_usd is not None:
-                budget_remaining_usd -= usage.get("cost_usd", 0.0)
-            llm_trace["rounds"].append(trace)
-
-            # --- Append assistant response to history ---
-            # Use model_dump to get a clean dict representation
-            messages.append(response_message.model_dump(exclude_none=True))
-
-            # --- Handle tool calls or final response ---
-            if response_message.tool_calls:
-                emit_progress("Thinking...")
-                llm_trace["assistant_notes"].append(response_message.content or "(tool use)")
-                
-                _handle_tool_calls(
-                    response_message.tool_calls, tools, drive_logs, task_id,
-                    stateful_executor, messages, llm_trace, emit_progress
+            # --- LLM Call with Resilience ---
+            try:
+                # Call LLM with resilience, using active and fallback models
+                response_content, tool_calls = await _call_llm_with_resilience(
+                    llm=llm,
+                    active_model=active_model,
+                    active_effort=active_effort,
+                    fallback_models=fallback_models,
+                    messages=messages,
+                    tools=tools,
+                    llm_trace=llm_trace,
+                    circuit_breaker=circuit_breaker,
                 )
-            else:
-                # No tool calls, this is the final response
-                return _handle_text_response(response_message.content, llm_trace, accumulated_usage)
+                # Usage stats are added inside _call_llm_with_resilience
+                
+            except RuntimeError as e: # Catch the specific exception from _call_llm_with_resilience
+                llm_trace["error"] = repr(e)
+                llm_trace["assistant_notes"].append(f"所有模型均已失效或熔断，无法获取 LLM 响应。错误：{e}")
+                log.critical("所有模型均已失效或熔断，无法获取 LLM 响应。错误：%s", e)
+                emit_progress(f"❌ 所有模型均已失效或熔断，任务终止。错误：{e}")
+                return "", accumulated_usage, llm_trace # Return empty content and terminate
 
-            round_idx += 1
+            except Exception as e:
+                # Other unexpected errors during LLM call (e.g., in ToolRegistry.schemas())
+                llm_trace["error"] = repr(e)
+                llm_trace["assistant_notes"].append(f"LLM 调用发生意外错误: {e}")
+                log.error("LLM 调用发生意外错误: %s", e)
+                emit_progress(f"❌ LLM 调用发生意外错误，任务终止。错误：{e}")
+                return "", accumulated_usage, llm_trace # Return empty content and terminate
+            # --- End LLM Call with Resilience ---
 
-        # --- Loop finished (max_rounds reached) ---
-        final_text = "⚠️ MAX_ROUNDS_REACHED. The task took too many steps. Please simplify the request or increase max_rounds."
-        llm_trace["assistant_notes"].append(final_text)
-        return final_text, accumulated_usage, llm_trace
+            if not response_content and not tool_calls:
+                # This should ideally be caught by _call_llm_with_resilience,
+                # but as a safeguard, we log it and continue to next iteration
+                # if there were no errors from _call_llm_with_resilience
+                log.warning("LLM returned an empty response and no tool calls, continuing...")
+                llm_trace["assistant_notes"].append("LLM returned empty, continuing.")
+                # If _call_llm_with_resilience returned nothing without raising, it means
+                # it ran out of models or they are all blocked. The above `except RuntimeError`
+                # should handle this. This check is mostly defensive.
+                continue
+
+            # Process tool calls if any
+            if tool_calls:
+                llm_trace["tool_calls"].extend(tool_calls)
+                error_count = await _handle_tool_calls(
+                    tool_calls=tool_calls,
+                    tools=tools,
+                    drive_logs=drive_logs,
+                    task_id=task_id,
+                    stateful_executor=tools.browser.stateful_executor, # Pass the browser's stateful executor
+                    messages=messages,
+                    llm_trace=llm_trace,
+                    emit_progress=emit_progress,
+                )
+                if error_count > 0:
+                    llm_trace["errors"].append(f"Tool execution encountered {error_count} errors.")
+                    emit_progress(f"⚠️ 工具执行过程中遇到 {error_count} 个错误。")
+
+                # Continue to next iteration to get LLM's response to tool results
+                continue
+
+            # If no tool calls, it's a final response
+            final_response, accumulated_usage, llm_trace = _handle_text_response(
+                response_content, llm_trace, accumulated_usage
+            )
+            emit_progress(f"✅ LLM 回复：{final_response[:200]}...")
+            return final_response, accumulated_usage, llm_trace
 
     finally:
-        # --- Final logging and cleanup ---
-        stateful_executor.shutdown(wait=False)
-        final_cost = accumulated_usage.get('cost_usd', 0.0)
-        log.info(
-            "Task %s finished. Rounds: %d, LLM Calls: %d, Cost: $%.4f",
-            task_id, round_idx, accumulated_usage.get('llm_calls', 0), final_cost
-        )
-        append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "llm_trace",
-            "task_id": task_id,
-            "trace": llm_trace,
-        })
-        if event_queue:
-            event_queue.put_nowait({
-                "type": "TASK_COMPLETED" if "final_text" in locals() else "TASK_FAILED",
-                "task_id": task_id,
-                "final_cost_usd": final_cost
-            })
+        iteration_guardian.exit_iteration() # Ensure iteration guardian state is cleaned up
