@@ -22,6 +22,18 @@ from ouroboros.memory import Memory
 log = logging.getLogger(__name__)
 
 
+def _safe_int_env(name: str, default: int, min_value: int, max_value: int) -> int:
+    try:
+        value = int(str(os.environ.get(name, str(default)) or default).strip())
+    except Exception:
+        value = int(default)
+    if value < min_value:
+        return min_value
+    if value > max_value:
+        return max_value
+    return value
+
+
 def _build_user_content(task: Dict[str, Any]) -> Any:
     """Build user message content. Supports text + optional image."""
     text = task.get("text", "")
@@ -97,18 +109,22 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     """Build scratchpad, identity, dialogue summary sections."""
     sections = []
 
+    scratchpad_cap = _safe_int_env('OUROBOROS_SCRATCHPAD_MAX_CHARS', 20000, 2000, 120000)
+    identity_cap = _safe_int_env('OUROBOROS_IDENTITY_MAX_CHARS', 20000, 2000, 120000)
+    summary_cap = _safe_int_env('OUROBOROS_DIALOGUE_SUMMARY_MAX_CHARS', 12000, 1000, 60000)
+
     scratchpad_raw = memory.load_scratchpad()
-    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, scratchpad_cap))
 
     identity_raw = memory.load_identity()
-    sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
+    sections.append("## Identity\n\n" + clip_text(identity_raw, identity_cap))
 
     # Dialogue summary (key moments from chat history)
     summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
     if summary_path.exists():
         summary_text = read_text(summary_path)
         if summary_text.strip():
-            sections.append("## Dialogue Summary\n\n" + clip_text(summary_text, 20000))
+            sections.append("## Dialogue Summary\n\n" + clip_text(summary_text, summary_cap))
 
     return sections
 
@@ -117,26 +133,28 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
     """Build recent chat, recent progress, recent tools, recent events sections."""
     sections = []
 
+    recent_window = _safe_int_env('OUROBOROS_CONTEXT_RECENT_WINDOW', 80, 20, 300)
+
     chat_summary = memory.summarize_chat(
-        memory.read_jsonl_tail("chat.jsonl", 200))
+        memory.read_jsonl_tail("chat.jsonl", recent_window))
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
-    progress_entries = memory.read_jsonl_tail("progress.jsonl", 200)
+    progress_entries = memory.read_jsonl_tail("progress.jsonl", recent_window)
     if task_id:
         progress_entries = [e for e in progress_entries if e.get("task_id") == task_id]
     progress_summary = memory.summarize_progress(progress_entries, limit=15)
     if progress_summary:
         sections.append("## Recent progress\n\n" + progress_summary)
 
-    tools_entries = memory.read_jsonl_tail("tools.jsonl", 200)
+    tools_entries = memory.read_jsonl_tail("tools.jsonl", recent_window)
     if task_id:
         tools_entries = [e for e in tools_entries if e.get("task_id") == task_id]
     tools_summary = memory.summarize_tools(tools_entries)
     if tools_summary:
         sections.append("## Recent tools\n\n" + tools_summary)
 
-    events_entries = memory.read_jsonl_tail("events.jsonl", 200)
+    events_entries = memory.read_jsonl_tail("events.jsonl", recent_window)
     if task_id:
         events_entries = [e for e in events_entries if e.get("task_id") == task_id]
     events_summary = memory.summarize_events(events_entries)
@@ -144,7 +162,7 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
         sections.append("## Recent events\n\n" + events_summary)
 
     supervisor_summary = memory.summarize_supervisor(
-        memory.read_jsonl_tail("supervisor.jsonl", 200))
+        memory.read_jsonl_tail("supervisor.jsonl", recent_window))
     if supervisor_summary:
         sections.append("## Supervisor\n\n" + supervisor_summary)
 

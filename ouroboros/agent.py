@@ -437,7 +437,7 @@ class OuroborosAgent:
 
             # Empty response guard
             if not isinstance(text, str) or not text.strip():
-                text = "⚠️ Model returned an empty response. Try rephrasing your request."
+                text = "⚠️ 模型返回了空响应，请尝试换个方式描述你的请求。"
 
             # Emit events for supervisor
             self._emit_task_results(task, text, usage, llm_trace, start_time, drive_logs)
