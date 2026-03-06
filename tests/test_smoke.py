@@ -113,6 +113,10 @@ EXPECTED_TOOLS = [
     # Context management
     "compact_context",
     "list_available_tools",
+    "system_health",
+    # Memory system
+    "chat_history_layered", "update_memory_point", "get_memory_points",
+    "schedule_reminder", "list_reminders", "cancel_reminder",
     "enable_tools",
 ]
 
