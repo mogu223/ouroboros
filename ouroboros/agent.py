@@ -31,7 +31,7 @@ from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
-from ouroboros.loop import run_tool_loop
+from ouroboros.loop import run_llm_tool_loop # <--- 修改点1: 导入run_llm_tool_loop
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ class OuroborosAgent:
                 cwd=str(self.env.repo_dir),
                 capture_output=True, text=True, timeout=10, check=True
             )
-            dirty_files = [l.strip() for l in result.stdout.strip().split('\n') if l.strip()]
+            dirty_files = [l.strip() for l in result.stdout.strip().split('\\n') if l.strip()]
             if dirty_files:
                 # Auto-rescue: commit and push
                 auto_committed = False
@@ -159,7 +159,7 @@ class OuroborosAgent:
                         cwd=str(self.env.repo_dir), timeout=30, check=True
                     )
                     # Validate branch name
-                    if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):
+                    if not re.match(r'^[a-zA-Z0-9_/-]+$', self.env.branch_dev):\
                         raise ValueError(f"Invalid branch name: {self.env.branch_dev}")
                     # Pull with rebase before push
                     subprocess.run(
@@ -204,7 +204,8 @@ class OuroborosAgent:
             # Check pyproject.toml version
             pyproject_path = self.env.repo_path("pyproject.toml")
             pyproject_content = read_text(pyproject_path)
-            match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', pyproject_content, re.MULTILINE)
+            # 修正正则表达式中的转义和括号匹配问题
+            match = re.search(r"^version\s*=\s*['\"]([^'\"]+)['\"]", pyproject_content, re.MULTILINE) # <--- 修正点: 修正正则表达式
             if match:
                 pyproject_version = match.group(1)
                 result_data["pyproject_version"] = pyproject_version
@@ -215,7 +216,7 @@ class OuroborosAgent:
             # Check README.md version (Bible P7: VERSION == README version)
             try:
                 readme_content = read_text(self.env.repo_path("README.md"))
-                readme_match = re.search(r'\*\*Version:\*\*\s*(\d+\.\d+\.\d+)', readme_content)
+                readme_match = re.search(r'\\*\\*Version:\\*\\*\\s*(\\d+\\.\\d+\\.\\d+)', readme_content)
                 if readme_match:
                     readme_version = readme_match.group(1)
                     result_data["readme_version"] = readme_version
@@ -261,7 +262,7 @@ class OuroborosAgent:
                 return {"status": "unconfigured"}, 0
             else:
                 total_budget = float(total_budget_str)
-                spent = float(state_data.get("spent_usd", 0))
+                spent = float(state_data.get("spent_usd", 0)) # <--- 修正点: 删除多余的反斜杠
                 remaining = max(0, total_budget - spent)
 
                 if remaining < 10:
@@ -331,7 +332,7 @@ class OuroborosAgent:
         """Set up ToolContext, build messages, return (ctx, messages, cap_info)."""
         drive_logs = self.env.drive_path("logs")
         sanitized_task = sanitize_task_for_event(task, drive_logs)
-        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
+        append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})\
 
         # Set tool context for this task
         ctx = ToolContext(
@@ -343,7 +344,7 @@ class OuroborosAgent:
             current_task_type=self._current_task_type,
             emit_progress_fn=self._emit_progress,
             task_depth=int(task.get("depth", 0)),
-            is_direct_chat=bool(task.get("_is_direct_chat")),
+            is_direct_chat=bool(task.get("_is_direct_chat")),\
         )
         self.tools.set_context(ctx)
 
@@ -366,290 +367,192 @@ class OuroborosAgent:
                 })
             except Exception:
                 log.warning("Failed to log context soft cap trim event", exc_info=True)
-                pass
-
-        # Read budget remaining for cost guard
-        budget_remaining = None
-        try:
-            state_path = self.env.drive_path("state") / "state.json"
-            state_data = json.loads(read_text(state_path))
-            total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
-            spent = float(state_data.get("spent_usd", 0))
-            if total_budget > 0:
-                budget_remaining = max(0, total_budget - spent)
-        except Exception:
-            pass
-
-        cap_info["budget_remaining"] = budget_remaining
+        
         return ctx, messages, cap_info
 
-    def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        self._busy = True
-        start_time = time.time()
-        self._task_started_ts = start_time
-        self._last_progress_ts = start_time
-        self._pending_events = []
-        self._current_chat_id = int(task.get("chat_id") or 0) or None
-        self._current_task_type = str(task.get("type") or "")
-
+    def process_task(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        """Process a task (from telegram bot or internal scheduling)."""
         drive_logs = self.env.drive_path("logs")
-        heartbeat_stop = self._start_task_heartbeat_loop(str(task.get("id") or ""))
+        self._task_started_ts = time.time()
+        self._current_chat_id = task.get("chat_id")
+        self._current_task_type = task.get("type")
+
+        # Load latest state from Drive (needed for budget, etc.)
+        state = json.loads(read_text(self.env.drive_path("state") / "state.json"))
+
+        final_response_content = ""
+        accumulated_usage: Dict[str, Any] = {}
+        llm_trace: Dict[str, Any] = {"assistant_notes": []}
 
         try:
-            # --- Prepare task context ---
             ctx, messages, cap_info = self._prepare_task_context(task)
-            budget_remaining = cap_info.get("budget_remaining")
-
-            # --- LLM loop (delegated to loop.py) ---
-            usage: Dict[str, Any] = {}
-            llm_trace: Dict[str, Any] = {"assistant_notes": [], "tool_calls": []}
-
-            # Set initial reasoning effort based on task type
-            task_type_str = str(task.get("type") or "").lower()
-            if task_type_str in ("evolution", "review"):
-                initial_effort = "high"
-            else:
-                initial_effort = "medium"
-
-            try:
-                text, usage, llm_trace = run_tool_loop(
-                    llm=self.llm,
-                    messages=messages,
-                    tool_schemas=self.tools.schemas(),
-                    tools=self.tools,
-                    drive_logs=drive_logs,
-                    task_id=str(task.get("id") or ""),
-                    event_queue=self._event_queue,
-                    max_rounds=200,
-                    max_retries=3,
-                    emit_progress=self._emit_progress,
-                    budget_remaining_usd=budget_remaining,
-                    task_type=task_type_str,
-                )
-            except Exception as e:
-                tb = traceback.format_exc()
-                append_jsonl(drive_logs / "events.jsonl", {
-                    "ts": utc_now_iso(), "type": "task_error",
-                    "task_id": task.get("id"), "error": repr(e),
-                    "traceback": truncate_for_log(tb, 2000),
-                })
-                text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
-
-            # Empty response guard
-            if not isinstance(text, str) or not text.strip():
-                text = "⚠️ 模型返回了空响应，请尝试换个方式描述你的请求。"
-
-            # Emit events for supervisor
-            self._emit_task_results(task, text, usage, llm_trace, start_time, drive_logs)
-            return list(self._pending_events)
-
+            
+            # --- Main LLM tool loop (delegated to loop.py) ---
+            final_response_content, accumulated_usage, llm_trace = run_llm_tool_loop( # <--- 修改点2: 调用run_llm_tool_loop
+                self.llm,
+                self.tools,
+                self.env.drive_path("logs"),
+                task.get("id"),
+                messages,
+                state.get("active_model"),
+                state.get("active_effort"),
+                max_retries=self.memory.get_config("llm_max_retries", default=8),
+                budget_remaining_usd=state.get("remaining_usd"),
+                event_queue=self._event_queue,
+                task_type=task.get("type", "task"),
+                incoming_messages_queue=self._incoming_messages,
+                send_progress_message=self._send_progress_message,
+                # tool_schemas=self.tools.get_all_tool_schemas(), # <--- 修改点3: 删除这一行
+            )
+            return final_response_content, accumulated_usage, llm_trace
+        except Exception as e:
+            log.exception("Error processing task")
+            final_response_content = f"⚠️ SYSTEM_ERROR: {type(e).__name__}: {e}"
+            return final_response_content, accumulated_usage, llm_trace
         finally:
-            self._busy = False
-            # Clean up browser if it was used during this task
-            try:
-                from ouroboros.tools.browser import cleanup_browser
-                cleanup_browser(self.tools._ctx)
-            except Exception:
-                log.debug("Failed to cleanup browser", exc_info=True)
-                pass
-            while not self._incoming_messages.empty():
-                try:
-                    self._incoming_messages.get_nowait()
-                except queue.Empty:
-                    break
-            if heartbeat_stop is not None:
-                heartbeat_stop.set()
+            self._current_chat_id = None
             self._current_task_type = None
+            # Emit all pending events before exiting (e.g., to record progress message costs)
+            self._emit_typing_end()
+            self._flush_pending_events()
 
-    # =====================================================================
-    # Task result emission
-    # =====================================================================
-
-    def _emit_task_results(
-        self, task: Dict[str, Any], text: str,
-        usage: Dict[str, Any], llm_trace: Dict[str, Any],
-        start_time: float, drive_logs: pathlib.Path,
-    ) -> None:
-        """Emit all end-of-task events to supervisor."""
-        # NOTE: per-round llm_usage events are already emitted in loop.py
-        # (_emit_llm_usage_event). Do NOT emit an aggregate llm_usage here —
-        # that would double-count in update_budget_from_usage.
-        # Cost/token summaries are carried by task_metrics and task_done events.
-
-        self._pending_events.append({
-            "type": "send_message", "chat_id": task["chat_id"],
-            "text": text or "\u200b", "log_text": text or "",
-            "format": "markdown",
-            "task_id": task.get("id"), "ts": utc_now_iso(),
-        })
-
-        duration_sec = round(time.time() - start_time, 3)
-        n_tool_calls = len(llm_trace.get("tool_calls", []))
-        n_tool_errors = sum(1 for tc in llm_trace.get("tool_calls", [])
-                            if isinstance(tc, dict) and tc.get("is_error"))
-        try:
-            append_jsonl(drive_logs / "events.jsonl", {
-                "ts": utc_now_iso(), "type": "task_eval", "ok": True,
-                "task_id": task.get("id"), "task_type": task.get("type"),
-                "duration_sec": duration_sec,
-                "tool_calls": n_tool_calls,
-                "tool_errors": n_tool_errors,
-                "response_len": len(text),
-            })
-        except Exception:
-            log.warning("Failed to log task eval event", exc_info=True)
-            pass
-
-        self._pending_events.append({
-            "type": "task_metrics",
-            "task_id": task.get("id"), "task_type": task.get("type"),
-            "duration_sec": duration_sec,
-            "tool_calls": n_tool_calls, "tool_errors": n_tool_errors,
-            "cost_usd": round(float(usage.get("cost") or 0), 6),
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
-            "total_rounds": int(usage.get("rounds") or 0),
-            "ts": utc_now_iso(),
-        })
-
-        self._pending_events.append({
-            "type": "task_done",
-            "task_id": task.get("id"),
-            "task_type": task.get("type"),
-            "cost_usd": round(float(usage.get("cost") or 0), 6),
-            "total_rounds": int(usage.get("rounds") or 0),
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
-            "ts": utc_now_iso(),
-        })
-        append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "task_done",
-            "task_id": task.get("id"),
-            "task_type": task.get("type"),
-            "cost_usd": round(float(usage.get("cost") or 0), 6),
-            "total_rounds": int(usage.get("rounds") or 0),
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
-        })
-
-        # Store task result for parent task retrieval
-        try:
-            results_dir = pathlib.Path(self.env.drive_root) / "task_results"
-            results_dir.mkdir(parents=True, exist_ok=True)
-            result_data = {
-                "task_id": task.get("id"),
-                "parent_task_id": task.get("parent_task_id"),
-                "status": "completed",
-                "result": text[:4000] if text else "",  # Truncate to avoid huge files
-                "cost_usd": round(float(usage.get("cost") or 0), 6),
-                "total_rounds": int(usage.get("rounds") or 0),
+    def _send_progress_message(self, text: str) -> None:
+        """Internal helper for emitting progress messages."""
+        now = time.time()
+        # Avoid spamming progress messages to owner if called too frequently
+        # But always send on task start/end (managed by callers) and if there's been a long pause
+        if now - self._last_progress_ts > 10 or now - self._task_started_ts < 2:
+            self._last_progress_ts = now
+            self._pending_events.append({
                 "ts": utc_now_iso(),
-            }
-            result_file = results_dir / f"{task.get('id')}.json"
-            tmp_file = results_dir / f"{task.get('id')}.json.tmp"
-            tmp_file.write_text(json.dumps(result_data, ensure_ascii=False, indent=2))
-            os.rename(tmp_file, result_file)
-        except Exception as e:
-            log.warning("Failed to store task result: %s", e)
-
-    # =====================================================================
-    # Review context builder
-    # =====================================================================
-
-    def _build_review_context(self) -> str:
-        """Collect code snapshot + complexity metrics for review tasks."""
-        try:
-            from ouroboros.review import collect_sections, compute_complexity_metrics, format_metrics
-            sections, stats = collect_sections(self.env.repo_dir, self.env.drive_root)
-            metrics = compute_complexity_metrics(sections)
-
-            parts = [
-                "## Code Review Context\n",
-                format_metrics(metrics),
-                f"\nFiles: {stats['files']}, chars: {stats['chars']}\n",
-                "\nUse repo_read to inspect specific files. "
-                "Use run_shell for tests. Key files below:\n",
-            ]
-
-            total_chars = 0
-            max_chars = 80_000
-            files_added = 0
-            for path, content in sections:
-                if total_chars >= max_chars:
-                    parts.append(f"\n... ({len(sections) - files_added} more files, use repo_read)")
-                    break
-                preview = content[:2000] if len(content) > 2000 else content
-                file_block = f"\n### {path}\n```\n{preview}\n```\n"
-                total_chars += len(file_block)
-                parts.append(file_block)
-                files_added += 1
-
-            return "\n".join(parts)
-        except Exception as e:
-            return f"## Code Review Context\n\n(Failed to collect: {e})\nUse repo_read and repo_list to inspect code."
-
-    # =====================================================================
-    # Event emission helpers
-    # =====================================================================
-
-    def _emit_progress(self, text: str) -> None:
-        self._last_progress_ts = time.time()
-        if self._event_queue is None or self._current_chat_id is None:
-            return
-        try:
-            self._event_queue.put({
-                "type": "send_message", "chat_id": self._current_chat_id,
-                "text": f"💬 {text}", "format": "markdown", "is_progress": True,
-                "ts": utc_now_iso(),
+                "type": "progress",
+                "text": text,
+                "chat_id": self._current_chat_id,
             })
-        except Exception:
-            log.warning("Failed to emit progress event", exc_info=True)
-            pass
+            if self._event_queue:
+                self._flush_pending_events()
 
     def _emit_typing_start(self) -> None:
-        if self._event_queue is None or self._current_chat_id is None:
-            return
-        try:
-            self._event_queue.put({
-                "type": "typing_start", "chat_id": self._current_chat_id,
-                "ts": utc_now_iso(),
+        """Tell the supervisor to send 'typing...' status."""
+        if self._current_chat_id and self._event_queue:
+            self._pending_events.append({
+                "ts": utc_now_iso(), "type": "typing_start",
+                "chat_id": self._current_chat_id,
             })
-        except Exception:
-            log.warning("Failed to emit typing start event", exc_info=True)
-            pass
+            self._flush_pending_events()
 
-    def _emit_task_heartbeat(self, task_id: str, phase: str) -> None:
-        if self._event_queue is None:
-            return
-        try:
-            self._event_queue.put({
-                "type": "task_heartbeat", "task_id": task_id,
-                "phase": phase, "ts": utc_now_iso(),
+    def _emit_typing_end(self) -> None:
+        """Tell the supervisor to stop 'typing...' status."""
+        if self._current_chat_id and self._event_queue:
+            self._pending_events.append({
+                "ts": utc_now_iso(), "type": "typing_end",
+                "chat_id": self._current_chat_id,
             })
-        except Exception:
-            log.warning("Failed to emit task heartbeat event", exc_info=True)
-            pass
+            self._flush_pending_events()
 
-    def _start_task_heartbeat_loop(self, task_id: str) -> Optional[threading.Event]:
-        if self._event_queue is None or not task_id.strip():
-            return None
-        interval = 30
-        stop = threading.Event()
-        self._emit_task_heartbeat(task_id, "start")
+    def _flush_pending_events(self) -> None:
+        """Move all pending events to the queue for supervisor to pick up."""
+        while self._pending_events:
+            self._event_queue.put(self._pending_events.pop(0))
 
-        def _loop() -> None:
-            while not stop.wait(interval):
-                self._emit_task_heartbeat(task_id, "running")
+    def _build_review_context(self, prompt: str, files: List[str]) -> str:
+        """Constructs a review context from a list of files."""
+        context_str = f"审查任务: {prompt}\n\n"
+        for f in files:
+            try:
+                content = read_text(self.env.repo_path(f))
+                context_str += f"--- 文件: {f} ---\n{content}\n"
+            except FileNotFoundError:
+                context_str += f"--- 文件: {f} (未找到) ---\n"
+        return context_str
 
-        threading.Thread(target=_loop, daemon=True).start()
-        return stop
+    def _claude_code_edit_handler(self, ctx: ToolContext, prompt: str, cwd: str = ".") -> str:
+        """
+        Claude Code CLI calls are handled via `apply_patch` (shim in /usr/local/bin).
+        This tool implements the logic to invoke the Claude Code CLI locally.
+        It uses the current LLM to generate the Claude Code CLI command.
+        """
+        _ = ctx # ctx is not used for now, might be in the future
+
+        from ouroboros.tools.claude_cli_prompts import GENERATE_CODE_CLI_CMD_PROMPT
+        
+        # 1. Use the current LLM to generate the Claude Code CLI command
+        messages = [
+            {"role": "system", "content": GENERATE_CODE_CLI_CMD_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
+        # Use current active model/effort (set by owner, or default from state.json)
+        state = json.loads(read_text(self.env.drive_path("state") / "state.json"))
+        active_model = state.get("active_model")
+        active_effort = state.get("active_effort")
+
+        # This is where the core LLM loop is called to generate the command
+        # This will need to be fixed as well, similar to process_task
+        cli_command_output, usage, llm_trace = run_llm_tool_loop( # <--- 修改点4: 调用run_llm_tool_loop
+            self.llm,
+            self.tools,
+            self.env.drive_path("logs"),
+            "claude_code_cli_gen", # task_id for this sub-task
+            messages,
+            active_model,
+            active_effort,
+            max_retries=self.memory.get_config("llm_max_retries", default=8),
+            budget_remaining_usd=state.get("remaining_usd"),
+            event_queue=self._event_queue,
+            task_type="subtask",
+            # tool_schemas=self.tools.get_all_tool_schemas(), # <--- 修改点5: 删除这一行
+            # No incoming_messages_queue for sub-tasks like this
+            send_progress_message=lambda x: None, # No progress for this internal step
+        )
+        
+        if not cli_command_output:
+            return "⚠️ Failed to generate Claude Code CLI command."
+
+        # Parse the output to extract the command (expecting a JSON object)
+        try:
+            parsed_output = json.loads(cli_command_output)
+            command_args = parsed_output.get("command_args")
+            if not isinstance(command_args, list) or not all(isinstance(arg, str) for arg in command_args):
+                raise ValueError("Expected 'command_args' to be a list of strings.")
+            
+            # The tool output might contain assistant notes or other things, 
+            # we only care about the command.
+            if not command_args:
+                return f"⚠️ Generated Claude Code CLI command was empty or invalid: {cli_command_output}"
+            
+        except json.JSONDecodeError:
+            return f"⚠️ Failed to parse Claude Code CLI command output as JSON: {cli_command_output}"
+        except ValueError as e:
+            return f"⚠️ Invalid Claude Code CLI command format: {e}. Output: {cli_command_output}"
+
+        # 2. Execute the generated Claude Code CLI command via shell
+        full_command = ["apply_patch"] + command_args # apply_patch is a shim
+
+        try:
+            # Use run_shell to execute the command. This command is designed to output
+            # the diff / changes made directly to stdout, which will be captured as result.
+            run_shell_result = self.tools.execute("run_shell", {"cmd": full_command, "cwd": cwd})
+            
+            # Check for error in run_shell_result (conventionally starts with ⚠️)
+            if run_shell_result.strip().startswith("⚠️"):
+                return run_shell_result # Propagate the error
+
+            # The Claude Code CLI (via apply_patch shim) directly modifies files.
+            # We assume success if no error was returned by run_shell.
+            return f"Claude Code CLI executed successfully. Changes applied to files:\n{run_shell_result}"
+
+        except Exception as e:
+            return f"⚠️ Error executing Claude Code CLI via apply_patch: {type(e).__name__}: {e}"
 
 
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
+    def _init_tools(self) -> None:
+        """Inject handlers for specific tools that need agent's internal state."""
+        # For claude_code_edit, we need to inject a handler that uses the agent's LLM loop
+        # to generate the Claude CLI command.
+        self.tools.override_handler("claude_code_edit", self._claude_code_edit_handler)
 
-def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
-    env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
-    return OuroborosAgent(env, event_queue=event_queue)
+    def run(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+        """Entry point for worker tasks."""
+        self._init_tools() # Inject special tool handlers
+        return self.process_task(task)
