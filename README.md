@@ -196,12 +196,21 @@ Full text: [BIBLE.md](BIBLE.md)
 ### Optional Configuration (environment variables)
 
 | Variable | Default | Description |
-|----------|---------|-------------|\n| `GITHUB_USER` | *(required in config cell)* | GitHub username |\n| `GITHUB_REPO` | `ouroboros` | GitHub repository name |\n| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |\n| `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |\n| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |\n| `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |\n| `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |\n| `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |\n| `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |\n| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
+|----------|---------|-------------|
+| `GITHUB_USER` | *(required in config cell)* | GitHub username |
+| `GITHUB_REPO` | `ouroboros` | GitHub repository name |
+| `OUROBOROS_MODEL` | `anthropic/claude-sonnet-4.6` | Primary LLM model (via OpenRouter) |
+| `OUROBOROS_MODEL_CODE` | `anthropic/claude-sonnet-4.6` | Model for code editing tasks |
+| `OUROBOROS_MODEL_LIGHT` | `google/gemini-3-pro-preview` | Model for lightweight tasks (dedup, compaction) |
+| `OUROBOROS_WEBSEARCH_MODEL` | `gpt-5` | Model for web search (OpenAI Responses API) |
+| `OUROBOROS_MAX_WORKERS` | `5` | Maximum number of parallel worker processes |
+| `OUROBOROS_BG_BUDGET_PCT` | `10` | Percentage of total budget allocated to background consciousness |
+| `OUROBOROS_MAX_ROUNDS` | `200` | Maximum LLM rounds per task |
+| `OUROBOROS_MODEL_FALLBACK_LIST` | `google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6` | Fallback model chain for empty responses |
 
 ---
 
 ## Evolution Time-Lapse
-
 
 ![Evolution Time-Lapse](docs/evolution.png)
 
