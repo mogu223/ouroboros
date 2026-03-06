@@ -220,7 +220,8 @@ def _handle_restart_request(evt: Dict[str, Any], ctx: Any) -> None:
     ctx.save_state(st2)
     ctx.persist_queue_snapshot(reason="pre_restart_exit")
     # Replace current process with fresh Python — loads all modules from scratch
-    launcher = os.path.join(os.getcwd(), "colab_launcher.py")
+    launcher_file = str(os.environ.get("OUROBOROS_LAUNCHER_FILE", "colab_launcher.py") or "colab_launcher.py").strip() or "colab_launcher.py"
+    launcher = os.path.join(os.getcwd(), launcher_file)
     os.execv(sys.executable, [sys.executable, launcher])
 
 

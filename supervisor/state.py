@@ -103,14 +103,26 @@ def atomic_write_text(path: pathlib.Path, content: str) -> None:
         log.error("Failed to write %s: %s", path, e)
 
 
-def budget_remaining() -> float:
-    """Calculate remaining budget."""
-    st = load_state()
-    spent = float(st.get("spent_usd") or 0.0)
-    return max(0.0, TOTAL_BUDGET_LIMIT - spent)
+def budget_remaining(st: Optional[Dict[str, Any]] = None) -> float:
+    """Calculate remaining budget.
+
+    TOTAL_BUDGET_LIMIT <= 0 means no hard cap (infinite budget).
+    Accepts optional preloaded state for call sites that already have it.
+    """
+    state_obj = st if isinstance(st, dict) else load_state()
+    spent = float(state_obj.get("spent_usd") or 0.0)
+    if float(TOTAL_BUDGET_LIMIT or 0.0) <= 0:
+        return float("inf")
+    return max(0.0, float(TOTAL_BUDGET_LIMIT) - spent)
 
 
-def budget_pct() -> float:
-    """Calculate budget usage percentage (0.0 - 1.0)."""
-    spent = float(load_state().get("spent_usd") or 0.0)
-    return min(1.0, spent / TOTAL_BUDGET_LIMIT) if TOTAL_BUDGET_LIMIT > 0 else 0.0
+def budget_pct(st: Optional[Dict[str, Any]] = None) -> float:
+    """Calculate budget usage percentage (0.0 - 1.0).
+
+    With TOTAL_BUDGET_LIMIT <= 0 (no cap), always returns 0.0.
+    """
+    if float(TOTAL_BUDGET_LIMIT or 0.0) <= 0:
+        return 0.0
+    state_obj = st if isinstance(st, dict) else load_state()
+    spent = float(state_obj.get("spent_usd") or 0.0)
+    return min(1.0, spent / float(TOTAL_BUDGET_LIMIT))

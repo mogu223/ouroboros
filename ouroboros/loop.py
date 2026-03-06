@@ -77,16 +77,18 @@ def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
         _pricing_fetched = True
         _cached_pricing = dict(_MODEL_PRICING_STATIC)
 
-        try:
-            from ouroboros.llm import fetch_openrouter_pricing
-            _live = fetch_openrouter_pricing()
-            if _live and len(_live) > 5:
-                _cached_pricing.update(_live)
-        except Exception as e:
-            import logging as _log
-            _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
-            # Reset flag so we retry next time
-            _pricing_fetched = False
+        base_url = str(os.environ.get("OPENAI_BASE_URL", "") or "").lower()
+        if "openrouter" in base_url:
+            try:
+                from ouroboros.llm import fetch_openrouter_pricing
+                _live = fetch_openrouter_pricing()
+                if _live and len(_live) > 5:
+                    _cached_pricing.update(_live)
+            except Exception as e:
+                import logging as _log
+                _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
+                # Reset flag so we retry next time
+                _pricing_fetched = False
 
         return _cached_pricing
 
@@ -620,6 +622,22 @@ def run_tool_loop(
     complexity = "high" if task_type in ("evolution", "review", "code") else "medium"
     reasoning_category = "code" if task_type in ("evolution", "review", "code") else "analysis" if task_type == "task" else "simple" if task_type == "message" else "creative"
     reasoning_strategy = get_strategy_for_task(reasoning_category, complexity)
+
+    # Speed/quality tradeoff control for direct chat tasks.
+    task_reasoning_override = str(os.environ.get("OUROBOROS_TASK_REASONING_STRATEGY", "simple") or "").strip().lower()
+    if task_type == "task" and task_reasoning_override in {"simple", "reflect", "vote", "reflect_vote"}:
+        reasoning_strategy = task_reasoning_override
+
+    def _safe_int_env(name: str, default: int) -> int:
+        try:
+            return int(str(os.environ.get(name, str(default)) or default).strip())
+        except Exception:
+            return int(default)
+
+    enhanced_reasoning_enabled = str(os.environ.get("OUROBOROS_ENABLE_ENHANCED_REASONING", "1") or "").strip().lower() in {"1", "true", "yes", "on"}
+    reasoning_samples = max(1, min(3, _safe_int_env("OUROBOROS_REASONING_AMPLIFIER_PASSES", 1)))
+    reasoning_min_chars = max(0, _safe_int_env("OUROBOROS_REASONING_AMPLIFIER_MIN_CHARS", 160))
+
     llm_trace["reasoning_strategy"] = reasoning_strategy
     log.info(f"Task: {task_type} -> Category: {reasoning_category}, Strategy: {reasoning_strategy}")
 
@@ -639,31 +657,50 @@ def run_tool_loop(
                     f"Stopping to prevent infinite loop. Please simplify your request.",
                 ), accumulated_usage, llm_trace
 
-            # Call LLM with retry (or enhanced reasoning for first round of complex tasks)
-            if round_idx == 0 and reasoning_strategy != 'simple':
-                # Use enhanced reasoning for complex tasks on first round
+            # Call LLM with retry (or enhanced reasoning on the first round when enabled)
+            question = ''
+            for m in reversed(messages):
+                if m.get('role') == 'user':
+                    question = str(m.get('content', '') or '')[:2000]
+                    break
+
+            can_use_enhanced = (
+                enhanced_reasoning_enabled
+                and round_idx == 0
+                and reasoning_strategy != 'simple'
+            )
+            if can_use_enhanced and task_type == "task" and len(question) < reasoning_min_chars:
+                can_use_enhanced = False
+
+            if can_use_enhanced and question:
                 def llm_adapter(messages, model=None, reasoning_effort=None, max_tokens=None):
                     try:
-                        resp, usage = llm.call(messages=messages, model=model or active_model, tools=None, effort=reasoning_effort or active_effort)
+                        resp, usage = llm.call(
+                            messages=messages,
+                            model=model or active_model,
+                            tools=None,
+                            effort=reasoning_effort or active_effort,
+                        )
                         return resp, usage
                     except Exception:
                         return {'content': ''}, {}
-                
-                question = ''
-                for m in reversed(messages):
-                    if m.get('role') == 'user':
-                        question = m.get('content', '')[:2000]
-                        break
-                
-                if question:
-                    log.info(f'Using enhanced reasoning: {reasoning_strategy}')
-                    answer, conf, meta = enhanced_reasoning(llm_adapter, question, model=active_model, strategy=reasoning_strategy, samples=2)
-                    msg = {'content': answer, 'tool_calls': []}
-                    cost = 0.05
-                else:
-                    msg, cost = _call_llm_with_retry(llm, messages, active_model, tool_schemas, active_effort, max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type)
+
+                log.info(f'Using enhanced reasoning: {reasoning_strategy}, samples={reasoning_samples}')
+                answer, conf, meta = enhanced_reasoning(
+                    llm_adapter,
+                    question,
+                    model=active_model,
+                    strategy=reasoning_strategy,
+                    samples=reasoning_samples,
+                )
+                msg = {'content': answer, 'tool_calls': []}
+                cost = 0.0
             else:
-                msg, cost = _call_llm_with_retry(llm, messages, active_model, tool_schemas, active_effort, max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type)
+                msg, cost = _call_llm_with_retry(
+                    llm, messages, active_model, tool_schemas, active_effort,
+                    max_retries, drive_logs, task_id, round_idx, event_queue,
+                    accumulated_usage, task_type,
+                )
 
             # Fallback logic: try ALL available fallback models before giving up
             if msg is None:

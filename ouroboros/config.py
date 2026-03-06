@@ -110,11 +110,20 @@ def get_all_available_models() -> List[str]:
     return models
 
 
+def get_openai_api_key() -> Optional[str]:
+    """Get API key for OpenAI-compatible providers (preferred), with OpenRouter fallback."""
+    return (
+        get_config("OPENAI_API_KEY")
+        or get_config("OPENROUTER_API_KEY")
+        or None
+    )
+
+
 def get_openrouter_api_key() -> Optional[str]:
-    """Get the OpenRouter API key, checking config file first."""
-    return get_config("OPENROUTER_API_KEY") or None
+    """Backward-compatible alias used by legacy call sites."""
+    return get_openai_api_key()
 
 
 def get_openai_base_url() -> str:
     """Get the OpenAI base URL, checking config file first."""
-    return get_config("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+    return get_config("OPENAI_BASE_URL", "https://api.openai.com/v1")

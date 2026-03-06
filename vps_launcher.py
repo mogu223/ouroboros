@@ -1,96 +1,442 @@
-import logging, os, sys, pathlib, time, threading, types, builtins, typing, random
-for n in ['Any','Dict','List','Optional','Set','Tuple','Union','Iterable','Callable']:
-    try: setattr(builtins, n, getattr(typing, n))
-    except: pass
+﻿from __future__ import annotations
+
+import datetime
+import logging
+import os
+import pathlib
+import queue
+import sys
+import time
+import types
+import uuid
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import quote
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-log = logging.getLogger("Ouroboros")
-base_dir = pathlib.Path("/opt/ouroboros").resolve()
-sys.path.insert(0, str(base_dir))
-data_dir = pathlib.Path("/content/drive/MyDrive/Ouroboros").resolve()
-os.environ["OUROBOROS_DRIVE_ROOT"] = str(data_dir)
-from supervisor.state import load_state, save_state
-from supervisor.telegram import TelegramClient, init as t_init
-from supervisor.workers import spawn_workers, get_event_q, handle_chat_direct
-from supervisor.queue import restore_pending_from_snapshot
-token = os.environ.get("TELEGRAM_BOT_TOKEN")
-budget = float(os.environ.get("TOTAL_BUDGET", "500000"))
-TG = TelegramClient(token)
-def dispatch(evt, ctx):
-    from supervisor.events import dispatch_event
-    dispatch_event(evt, ctx)
+log = logging.getLogger('Ouroboros')
 
-# Discord Bridge 初始化
-DISCORD_ENABLED = False
-try:
-    discord_config_path = pathlib.Path("/opt/ouroboros/.env.discord")
-    if discord_config_path.exists():
-        discord_token = None
-        discord_owner_id = None
-        with open(discord_config_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("DISCORD_BOT_TOKEN="):
-                    discord_token = line.split("=", 1)[1].strip()
-                elif line.startswith("DISCORD_OWNER_ID="):
-                    discord_owner_id = line.split("=", 1)[1].strip()
-        
-        if discord_token:
-            log.info("Discord configuration found, initializing bridge...")
-            os.environ["DISCORD_BOT_TOKEN"] = discord_token
-            if discord_owner_id:
-                os.environ["DISCORD_OWNER_ID"] = discord_owner_id
-            
-            from ouroboros.channels.discord_bridge import DiscordBridge
-            
-            def start_discord_bot():
-                try:
-                    bridge = DiscordBridge()
-                    bridge.run()
-                except Exception as e:
-                    log.error(f"Discord bot error: {e}", exc_info=True)
-            
-            discord_thread = threading.Thread(target=start_discord_bot, daemon=True, name="DiscordBridge")
-            discord_thread.start()
-            DISCORD_ENABLED = True
-            log.info("✅ Discord bridge started in background thread")
-        else:
-            log.info("Discord token not found in config, Discord bridge disabled")
-    else:
-        log.info("Discord config file not found, Discord bridge disabled")
-except Exception as e:
-    log.warning(f"Failed to initialize Discord bridge: {e}")
-    DISCORD_ENABLED = False
 
-from supervisor.telegram import send_with_budget
-from supervisor.state import append_jsonl
-_ctx = types.SimpleNamespace(
-    DRIVE_ROOT=data_dir, 
-    REPO_DIR=base_dir, 
-    TG=TG, 
-    MAX_WORKERS=2, 
-    send_with_budget=send_with_budget, 
-    load_state=load_state, 
-    save_state=save_state,
-    append_jsonl=append_jsonl
-)
-# s_init removed
-t_init(drive_root=data_dir, total_budget_limit=budget, budget_report_every=5, tg_client=TG)
-def smart_chat(cid, txt, img):
-    if os.environ.get("API_POOL"):
-        c = random.choice(os.environ.get("API_POOL").split(",")).split("|")
-        os.environ["OPENAI_BASE_URL"], os.environ["OPENAI_API_KEY"] = c[0], c[1]
-    handle_chat_direct(cid, txt + "\n(用中文回复)", img)
-spawn_workers(2); restore_pending_from_snapshot()
-offset = int(load_state().get("tg_offset") or 0)
-log.info("🚀 启动成功，监听中...")
-while True:
+def _safe_int_env(name: str, default: int) -> int:
     try:
-        eq = get_event_q()
-        while not eq.empty(): dispatch(eq.get_nowait(), _ctx)
-        upds = TG.get_updates(offset=offset, timeout=5)
-        for u in upds:
-            offset = int(u["update_id"]) + 1
-            m = u.get("message", {})
-            if m.get("text"): threading.Thread(target=smart_chat, args=(m['chat']['id'], m['text'], None), daemon=True).start()
-        st = load_state(); st["tg_offset"] = offset; save_state(st); time.sleep(0.5)
-    except Exception as e: log.error(f"ERR: {e}"); time.sleep(1)
+        return int(str(os.environ.get(name, str(default)) or default).strip())
+    except Exception:
+        return int(default)
+
+
+def _safe_float_env(name: str, default: float) -> float:
+    try:
+        return float(str(os.environ.get(name, str(default)) or default).strip())
+    except Exception:
+        return float(default)
+
+
+REPO_DIR = pathlib.Path(os.environ.get('OUROBOROS_REPO_DIR', '/opt/ouroboros')).resolve()
+DRIVE_ROOT = pathlib.Path(os.environ.get('OUROBOROS_DRIVE_ROOT', '/var/lib/ouroboros')).resolve()
+
+os.environ.setdefault('OUROBOROS_REPO_DIR', str(REPO_DIR))
+os.environ.setdefault('OUROBOROS_DRIVE_ROOT', str(DRIVE_ROOT))
+os.environ.setdefault('OUROBOROS_LAUNCHER_FILE', 'vps_launcher.py')
+
+sys.path.insert(0, str(REPO_DIR))
+
+from supervisor import state as sup_state
+from supervisor import queue as sup_queue
+from supervisor import workers as sup_workers
+from supervisor import git_ops as sup_git
+from supervisor.state import load_state, save_state, append_jsonl
+from supervisor.telegram import TelegramClient, init as telegram_init, send_with_budget
+from supervisor.events import dispatch_event
+from supervisor.queue import _queue_lock
+from ouroboros.consciousness import BackgroundConsciousness
+
+TELEGRAM_TOKEN = str(os.environ.get('TELEGRAM_BOT_TOKEN', '') or '').strip()
+if not TELEGRAM_TOKEN:
+    raise RuntimeError('Missing TELEGRAM_BOT_TOKEN')
+
+TOTAL_BUDGET = _safe_float_env('TOTAL_BUDGET', 0.0)
+MAX_WORKERS = max(1, _safe_int_env('OUROBOROS_MAX_WORKERS', 3))
+POLL_TIMEOUT = max(3, _safe_int_env('OUROBOROS_TELEGRAM_POLL_TIMEOUT', _safe_int_env('TELEGRAM_GETUPDATES_TIMEOUT', 15)))
+MAIN_LOOP_SLEEP = max(0.05, _safe_float_env('OUROBOROS_MAIN_LOOP_SLEEP_SEC', 0.2))
+SOFT_TIMEOUT_SEC = max(60, _safe_int_env('OUROBOROS_TASK_SOFT_TIMEOUT_SEC', 900))
+HARD_TIMEOUT_SEC = max(SOFT_TIMEOUT_SEC + 60, _safe_int_env('OUROBOROS_TASK_HARD_TIMEOUT_SEC', 2400))
+BRANCH_DEV = str(os.environ.get('OUROBOROS_BRANCH_DEV', 'ouroboros') or 'ouroboros').strip()
+BRANCH_STABLE = str(os.environ.get('OUROBOROS_BRANCH_STABLE', 'ouroboros-stable') or 'ouroboros-stable').strip()
+
+
+def _build_remote_url() -> str:
+    explicit = str(os.environ.get('OUROBOROS_REMOTE_URL', '') or '').strip()
+    if explicit:
+        return explicit
+
+    gh_user = str(os.environ.get('GITHUB_USER', '') or '').strip()
+    gh_repo = str(os.environ.get('GITHUB_REPO', '') or '').strip()
+    gh_token = str(os.environ.get('GITHUB_TOKEN', '') or '').strip()
+
+    if gh_user and gh_repo and gh_token:
+        token_q = quote(gh_token, safe='')
+        return f'https://{token_q}:x-oauth-basic@github.com/{gh_user}/{gh_repo}.git'
+    if gh_user and gh_repo:
+        return f'https://github.com/{gh_user}/{gh_repo}.git'
+    return ''
+
+
+def _init_paths() -> None:
+    for sub in ('state', 'logs', 'memory', 'index', 'locks', 'archive', 'task_results'):
+        (DRIVE_ROOT / sub).mkdir(parents=True, exist_ok=True)
+
+
+def _init_state_module() -> None:
+    sup_state.DRIVE_ROOT = DRIVE_ROOT
+    sup_state.STATE_PATH = DRIVE_ROOT / 'state' / 'state.json'
+    sup_state.QUEUE_SNAPSHOT_PATH = DRIVE_ROOT / 'state' / 'queue_snapshot.json'
+    sup_state.TOTAL_BUDGET_LIMIT = float(TOTAL_BUDGET)
+    sup_state.EVOLUTION_BUDGET_RESERVE = max(0.0, _safe_float_env('OUROBOROS_EVOLUTION_BUDGET_RESERVE', 5.0))
+
+    state_obj = load_state()
+    save_state(state_obj)
+
+
+def _update_budget_from_usage(usage: Dict[str, Any]) -> None:
+    if not isinstance(usage, dict):
+        return
+    st = load_state()
+    st['spent_calls'] = int(st.get('spent_calls') or 0) + 1
+    st['spent_tokens_prompt'] = int(st.get('spent_tokens_prompt') or 0) + int(usage.get('prompt_tokens') or 0)
+    st['spent_tokens_completion'] = int(st.get('spent_tokens_completion') or 0) + int(usage.get('completion_tokens') or 0)
+    st['spent_tokens_cached'] = int(st.get('spent_tokens_cached') or 0) + int(usage.get('cached_tokens') or 0)
+    st['spent_usd'] = float(st.get('spent_usd') or 0.0) + float(usage.get('cost') or 0.0)
+    save_state(st)
+
+
+def _owner_chat_id() -> Optional[int]:
+    st = load_state()
+    owner = st.get('owner_chat_id')
+    if owner is None:
+        return None
+    try:
+        return int(owner)
+    except Exception:
+        return None
+
+
+def _ensure_owner(chat_id: int, tg: TelegramClient) -> bool:
+    st = load_state()
+    owner_chat = st.get('owner_chat_id')
+
+    if owner_chat is None:
+        st['owner_chat_id'] = int(chat_id)
+        st['owner_id'] = int(chat_id)
+        st['last_owner_message_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        save_state(st)
+        send_with_budget(int(chat_id), '✅ Owner registered. Ouroboros is online.')
+        return True
+
+    try:
+        owner_chat_int = int(owner_chat)
+    except Exception:
+        owner_chat_int = int(chat_id)
+
+    if int(chat_id) != owner_chat_int:
+        tg.send_message(chat_id, '⛔ Unauthorized chat. This bot is owner-locked.')
+        return False
+
+    st['last_owner_message_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_state(st)
+    return True
+
+
+def _set_evolution_mode(enabled: bool) -> None:
+    st = load_state()
+    st['evolution_mode_enabled'] = bool(enabled)
+    save_state(st)
+
+    if not enabled:
+        with _queue_lock:
+            sup_workers.PENDING[:] = [t for t in sup_workers.PENDING if str(t.get('type') or '') != 'evolution']
+            sup_queue.sort_pending()
+            sup_queue.persist_queue_snapshot(reason='evolve_off_fast_cmd')
+
+
+def _handle_fast_command(chat_id: int, text: str) -> bool:
+    cmd = str(text or '').strip().lower()
+
+    if cmd == '/status':
+        st = load_state()
+        worker_total = len(sup_workers.WORKERS)
+        worker_alive = sum(1 for w in sup_workers.WORKERS.values() if w.proc.is_alive())
+        pending = len(sup_workers.PENDING)
+        running = len(sup_workers.RUNNING)
+        remaining = sup_state.budget_remaining(st)
+        budget_str = 'unlimited' if remaining == float('inf') else f'${remaining:.2f}'
+        msg = (
+            f'🟢 service=online\n'
+            f'workers={worker_alive}/{worker_total}\n'
+            f'pending={pending}, running={running}\n'
+            f'budget_remaining={budget_str}\n'
+            f'evolution={"on" if bool(st.get("evolution_mode_enabled")) else "off"}'
+        )
+        send_with_budget(chat_id, msg)
+        return True
+
+    if cmd in ('/evolve off', '/evolve stop'):
+        _set_evolution_mode(False)
+        send_with_budget(chat_id, '🧬 Evolution: OFF')
+        return True
+
+    if cmd in ('/evolve on', '/evolve start'):
+        _set_evolution_mode(True)
+        send_with_budget(chat_id, '🧬 Evolution: ON')
+        return True
+
+    return False
+
+
+def _extract_message(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    msg = update.get('message')
+    if isinstance(msg, dict):
+        return msg
+    msg = update.get('edited_message')
+    if isinstance(msg, dict):
+        return msg
+    return None
+
+
+def _build_task_from_update(update: Dict[str, Any], tg: TelegramClient) -> Optional[Dict[str, Any]]:
+    msg = _extract_message(update)
+    if not msg:
+        return None
+
+    chat = msg.get('chat') or {}
+    chat_id_raw = chat.get('id')
+    try:
+        chat_id = int(chat_id_raw)
+    except Exception:
+        return None
+
+    text = str(msg.get('text') or '').strip()
+
+    image_b64 = None
+    image_mime = ''
+    caption = str(msg.get('caption') or '').strip()
+
+    photos = msg.get('photo')
+    if isinstance(photos, list) and photos:
+        file_id = str((photos[-1] or {}).get('file_id') or '').strip()
+        if file_id:
+            b64, mime = tg.download_file_base64(file_id)
+            if b64:
+                image_b64 = b64
+                image_mime = mime or 'image/jpeg'
+                if not text:
+                    text = caption
+                if not text:
+                    text = '(image attached)'
+
+    if not text:
+        return None
+
+    task: Dict[str, Any] = {
+        'id': uuid.uuid4().hex[:8],
+        'type': 'task',
+        'chat_id': int(chat_id),
+        'text': text,
+        '_is_direct_chat': True,
+    }
+
+    if image_b64:
+        task['image_base64'] = image_b64
+        task['image_mime'] = image_mime
+        if caption:
+            task['image_caption'] = caption
+
+    return task
+
+
+def _make_context(tg: TelegramClient, consciousness: BackgroundConsciousness) -> Any:
+    return types.SimpleNamespace(
+        DRIVE_ROOT=DRIVE_ROOT,
+        REPO_DIR=REPO_DIR,
+        BRANCH_DEV=BRANCH_DEV,
+        BRANCH_STABLE=BRANCH_STABLE,
+        TG=tg,
+        RUNNING=sup_workers.RUNNING,
+        WORKERS=sup_workers.WORKERS,
+        PENDING=sup_workers.PENDING,
+        consciousness=consciousness,
+        send_with_budget=send_with_budget,
+        load_state=load_state,
+        save_state=save_state,
+        append_jsonl=append_jsonl,
+        update_budget_from_usage=_update_budget_from_usage,
+        safe_restart=sup_git.safe_restart,
+        kill_workers=sup_workers.kill_workers,
+        persist_queue_snapshot=sup_queue.persist_queue_snapshot,
+        queue_review_task=sup_queue.queue_review_task,
+        enqueue_task=sup_queue.enqueue_task,
+        cancel_task_by_id=sup_queue.cancel_task_by_id,
+        sort_pending=sup_queue.sort_pending,
+    )
+
+
+def main() -> None:
+    _init_paths()
+    _init_state_module()
+
+    remote_url = _build_remote_url()
+
+    sup_queue.init(DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
+    sup_workers.init(
+        repo_dir=REPO_DIR,
+        drive_root=DRIVE_ROOT,
+        max_workers=MAX_WORKERS,
+        soft_timeout=SOFT_TIMEOUT_SEC,
+        hard_timeout=HARD_TIMEOUT_SEC,
+        total_budget_limit=TOTAL_BUDGET,
+        branch_dev=BRANCH_DEV,
+        branch_stable=BRANCH_STABLE,
+    )
+    sup_git.init(
+        repo_dir=REPO_DIR,
+        drive_root=DRIVE_ROOT,
+        remote_url=remote_url,
+        branch_dev=BRANCH_DEV,
+        branch_stable=BRANCH_STABLE,
+    )
+
+    tg = TelegramClient(TELEGRAM_TOKEN)
+    telegram_init(
+        drive_root=DRIVE_ROOT,
+        total_budget_limit=TOTAL_BUDGET,
+        budget_report_every=max(1, _safe_int_env('OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES', 10)),
+        tg_client=tg,
+    )
+
+    event_q = sup_workers.get_event_q()
+    consciousness = BackgroundConsciousness(
+        drive_root=DRIVE_ROOT,
+        repo_dir=REPO_DIR,
+        event_queue=event_q,
+        owner_chat_id_fn=_owner_chat_id,
+    )
+    ctx = _make_context(tg, consciousness)
+
+    sup_workers.spawn_workers(MAX_WORKERS)
+    restored = sup_queue.restore_pending_from_snapshot()
+
+    st = load_state()
+    offset = int(st.get('tg_offset') or 0)
+
+    append_jsonl(
+        DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
+        {
+            'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'type': 'launcher_start',
+            'launcher': 'vps_launcher.py',
+            'repo_dir': str(REPO_DIR),
+            'drive_root': str(DRIVE_ROOT),
+            'max_workers': MAX_WORKERS,
+            'poll_timeout': POLL_TIMEOUT,
+            'restored_pending': restored,
+        },
+    )
+
+    log.info('🚀 VPS launcher started: workers=%d, poll_timeout=%ds', MAX_WORKERS, POLL_TIMEOUT)
+    last_heartbeat = 0.0
+
+    while True:
+        try:
+            drained = 0
+            while drained < 256:
+                try:
+                    evt = event_q.get_nowait()
+                except queue.Empty:
+                    break
+                dispatch_event(evt, ctx)
+                drained += 1
+
+            updates = tg.get_updates(offset=offset, timeout=POLL_TIMEOUT)
+            for upd in updates:
+                try:
+                    update_id = int(upd.get('update_id') or 0)
+                except Exception:
+                    continue
+                if update_id >= offset:
+                    offset = update_id + 1
+
+                task = _build_task_from_update(upd, tg)
+                if not task:
+                    continue
+
+                chat_id = int(task['chat_id'])
+                if not _ensure_owner(chat_id, tg):
+                    continue
+
+                if _handle_fast_command(chat_id, str(task.get('text') or '')):
+                    continue
+
+                sup_queue.enqueue_task(task)
+
+            st = load_state()
+            st['tg_offset'] = int(offset)
+            save_state(st)
+
+            if not sup_workers.WORKERS:
+                append_jsonl(
+                    DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
+                    {
+                        'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        'type': 'worker_pool_empty_respawn',
+                        'requested_workers': MAX_WORKERS,
+                    },
+                )
+                sup_workers.spawn_workers(MAX_WORKERS)
+
+            sup_workers.ensure_workers_healthy()
+            sup_queue.enforce_task_timeouts()
+            sup_workers.assign_tasks()
+            sup_queue.enqueue_evolution_task_if_needed()
+
+            now = time.time()
+            if now - last_heartbeat >= 30:
+                append_jsonl(
+                    DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
+                    {
+                        'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                        'type': 'main_loop_heartbeat',
+                        'offset': int(offset),
+                        'workers_total': len(sup_workers.WORKERS),
+                        'workers_alive': sum(1 for w in sup_workers.WORKERS.values() if w.proc.is_alive()),
+                        'pending_count': len(sup_workers.PENDING),
+                        'running_count': len(sup_workers.RUNNING),
+                        'event_q_size': int(event_q.qsize()) if hasattr(event_q, 'qsize') else 0,
+                        'running_task_ids': sup_workers.get_running_task_ids(),
+                        'spent_usd': float(load_state().get('spent_usd') or 0.0),
+                    },
+                )
+                last_heartbeat = now
+
+            time.sleep(MAIN_LOOP_SLEEP)
+
+        except Exception as e:
+            append_jsonl(
+                DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
+                {
+                    'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'type': 'main_loop_error',
+                    'error': repr(e),
+                },
+            )
+            log.error('Main loop error: %s', e, exc_info=True)
+            time.sleep(1.0)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.info('Received KeyboardInterrupt, shutting down workers...')
+        try:
+            sup_workers.kill_workers()
+        except Exception:
+            pass
+        raise

@@ -17,7 +17,7 @@ from ouroboros.config import (
     get_default_model,
     get_fallback_models,
     get_all_available_models,
-    get_openrouter_api_key,
+    get_openai_api_key,
     get_openai_base_url,
 )
 
@@ -130,7 +130,12 @@ class LLMClient:
         self.model = model or get_default_model()
         self.effort = effort
         # Use dynamic config for API key and base URL
-        self._api_key = api_key or get_openrouter_api_key() or os.environ.get("OPENROUTER_API_KEY", "")
+        self._api_key = (
+            api_key
+            or get_openai_api_key()
+            or os.environ.get("OPENAI_API_KEY", "")
+            or os.environ.get("OPENROUTER_API_KEY", "")
+        )
         self._base_url = get_openai_base_url() or os.environ.get("OPENAI_BASE_URL", base_url)
         self._client = None
 
@@ -248,15 +253,40 @@ class LLMClient:
                 if cache_write:
                     usage["cache_write_tokens"] = int(cache_write)
 
-        # Ensure cost is present in usage (OpenRouter includes it, but fallback if missing)
+        # Ensure cost is present in usage.
+        # Only OpenRouter exposes generation-cost endpoint; for generic OpenAI-compatible
+        # proxies we skip this extra round-trip to avoid latency spikes.
         if not usage.get("cost"):
-            gen_id = resp_dict.get("id") or ""
-            if gen_id:
-                cost = self._fetch_generation_cost(gen_id)
-                if cost is not None:
-                    usage["cost"] = cost
+            base = str(self._base_url or "").lower()
+            if "openrouter" in base:
+                gen_id = resp_dict.get("id") or ""
+                if gen_id:
+                    cost = self._fetch_generation_cost(gen_id)
+                    if cost is not None:
+                        usage["cost"] = cost
+            else:
+                usage["cost"] = float(usage.get("cost") or 0.0)
 
         return msg, usage
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        reasoning_effort: str = "medium",
+        max_tokens: int = 16384,
+        tool_choice: str = "auto",
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Compatibility wrapper used by legacy call sites."""
+        return self.call(
+            messages=messages,
+            model=model or self.model,
+            tools=tools,
+            effort=reasoning_effort,
+            max_tokens=max_tokens,
+            tool_choice=tool_choice,
+        )
 
     def vision_query(
         self,
