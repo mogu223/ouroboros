@@ -387,6 +387,11 @@ def main() -> None:
             if not sup_workers.WORKERS:
                 sup_workers.spawn_workers(MAX_WORKERS)
 
+            # Drive worker scheduling: keep pool healthy and dispatch queued tasks
+            sup_workers.ensure_workers_healthy()
+            sup_queue.enforce_task_timeouts()
+            sup_workers.assign_tasks()
+
             now = time.time()
             if now - last_heartbeat >= 30:
                 consciousness.heartbeat()
