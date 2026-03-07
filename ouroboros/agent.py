@@ -31,7 +31,45 @@ from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
 from ouroboros.memory import Memory
 from ouroboros.context import build_llm_messages
-from ouroboros.loop import run_llm_tool_loop # <--- 修改点1: 导入run_llm_tool_loop
+import asyncio
+from ouroboros.loop import run_tool_loop
+
+
+def run_llm_tool_loop(
+    llm,
+    tools,
+    drive_logs,
+    task_id,
+    messages,
+    active_model,
+    active_effort,
+    *,
+    max_retries=8,
+    budget_remaining_usd=None,
+    event_queue=None,
+    task_type='task',
+    incoming_messages_queue=None,
+    send_progress_message=None,
+):
+    _ = incoming_messages_queue
+    emit_progress = send_progress_message or (lambda _text: None)
+    return asyncio.run(
+        run_tool_loop(
+            llm=llm,
+            tools=tools,
+            messages=messages,
+            drive_logs=drive_logs,
+            task_id=str(task_id),
+            emit_progress=emit_progress,
+            active_model=str(active_model or ''),
+            active_effort=str(active_effort or 'medium'),
+            budget_remaining_usd=budget_remaining_usd,
+            max_retries=int(max_retries),
+            task_type=str(task_type or 'task'),
+            event_queue=event_queue,
+        )
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -556,3 +594,86 @@ class OuroborosAgent:
         """Entry point for worker tasks."""
         self._init_tools() # Inject special tool handlers
         return self.process_task(task)
+
+# --- supervisor compatibility patch ---
+def _compat_handle_task(self, task):
+    self._busy = True
+    self._pending_events = []
+    start_ts = time.time()
+
+    text = ''
+    usage = {}
+    llm_trace = {}
+    try:
+        text, usage, llm_trace = self.run(task)
+    except Exception as e:
+        log.exception('handle_task failed')
+        text = f'⚠️ SYSTEM_ERROR: {type(e).__name__}: {e}'
+        usage = {}
+        llm_trace = {'error': repr(e)}
+    finally:
+        self._busy = False
+
+    chat_id_raw = task.get('chat_id')
+    try:
+        chat_id = int(chat_id_raw) if chat_id_raw is not None else 0
+    except Exception:
+        chat_id = 0
+
+    if chat_id and str(text or '').strip():
+        self._pending_events.append({
+            'ts': utc_now_iso(),
+            'type': 'send_message',
+            'chat_id': chat_id,
+            'text': str(text),
+            'format': 'markdown',
+            'is_progress': False,
+        })
+
+    if usage:
+        self._pending_events.append({
+            'ts': utc_now_iso(),
+            'type': 'llm_usage',
+            'task_id': str(task.get('id') or ''),
+            'category': str(task.get('type') or 'task'),
+            'model': str((llm_trace or {}).get('model_used') or ''),
+            'usage': usage,
+        })
+
+    self._pending_events.append({
+        'ts': utc_now_iso(),
+        'type': 'task_done',
+        'task_id': str(task.get('id') or ''),
+        'task_type': str(task.get('type') or 'task'),
+        'cost_usd': float((usage or {}).get('cost') or 0.0),
+        'total_rounds': int((usage or {}).get('rounds') or 0),
+        'duration_sec': round(time.time() - start_ts, 3),
+    })
+
+    return list(self._pending_events)
+
+
+def _compat_send_progress_message(self, text):
+    now = time.time()
+    if now - self._last_progress_ts > 10 or now - self._task_started_ts < 2:
+        self._last_progress_ts = now
+        self._pending_events.append({
+            'ts': utc_now_iso(),
+            'type': 'send_message',
+            'text': f'💬 {text}',
+            'chat_id': self._current_chat_id,
+            'format': 'markdown',
+            'is_progress': True,
+        })
+        if self._event_queue:
+            self._flush_pending_events()
+
+
+OuroborosAgent.handle_task = _compat_handle_task
+OuroborosAgent._send_progress_message = _compat_send_progress_message
+
+
+def make_agent(repo_dir: str, drive_root: str, event_queue=None):
+    env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
+    return OuroborosAgent(env, event_queue=event_queue)
+# --- end compatibility patch ---
