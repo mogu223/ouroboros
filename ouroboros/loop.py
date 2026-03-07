@@ -651,8 +651,8 @@ async def run_tool_loop(
 
             if max_wall_time_sec and (time.time() - loop_started_ts) >= float(max_wall_time_sec):
                 timeout_msg = (
-                    f"?? ?????? {int(max_wall_time_sec)} ????????"
-                    "??????????????"
+                    f"Task exceeded {int(max_wall_time_sec)}s wall-time limit and was stopped early. "
+                    "Please split the request into smaller steps."
                 )
                 llm_trace["error"] = timeout_msg
                 llm_trace["assistant_notes"].append("task_wall_time_exceeded")
@@ -759,7 +759,10 @@ async def run_tool_loop(
             emit_progress(f"✅ LLM 回复：{final_response[:200]}...")
             return final_response, accumulated_usage, llm_trace
 
-        loop_limit_msg = f"?? ???????? ({max_iterations})????????????????????"
+        loop_limit_msg = (
+            f"Task reached max iterations ({max_iterations}) and was stopped. "
+            "Please narrow the request and retry."
+        )
         llm_trace["error"] = loop_limit_msg
         llm_trace["assistant_notes"].append("max_iterations_reached")
         emit_progress(loop_limit_msg)
