@@ -24,6 +24,9 @@ EVOLUTION_BUDGET_RESERVE: float = 5.0  # Reserve for evolution tasks
 # Queue snapshot path
 QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
 
+# Evolution failure threshold before auto-pause
+EVOLUTION_FAILURE_THRESHOLD: int = 100  # Max consecutive failures before pausing evolution
+
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure all required state fields have default values."""
