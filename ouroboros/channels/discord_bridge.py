@@ -20,11 +20,12 @@ logger = logging.getLogger(__name__)
 # 配置文件路径
 CONFIG_FILE = Path("/opt/ouroboros/.env.discord")
 
-# 全局状态
+# 全局状态 - 使用锁保护
 _discord_bot: Optional[commands.Bot] = None
 _bot_event_loop: Optional[asyncio.AbstractEventLoop] = None
 _bot_ready_event = threading.Event()  # 用于等待 bot 就绪
 _pending_responses: Dict[str, asyncio.Future] = {}
+_state_lock = threading.Lock()
 
 
 def _get_discord_token() -> Optional[str]:
@@ -52,14 +53,20 @@ def _get_allowed_users() -> set:
     # 从环境变量获取
     owner_id = os.getenv("DISCORD_OWNER_ID")
     if owner_id:
-        allowed.add(int(owner_id))
+        try:
+            allowed.add(int(owner_id))
+        except ValueError:
+            pass
     
     allowed_users = os.getenv("DISCORD_ALLOWED_USERS")
     if allowed_users:
         for uid in allowed_users.split(","):
             uid = uid.strip()
             if uid:
-                allowed.add(int(uid))
+                try:
+                    allowed.add(int(uid))
+                except ValueError:
+                    pass
     
     # 从配置文件获取
     if CONFIG_FILE.exists():
@@ -71,12 +78,18 @@ def _get_allowed_users() -> set:
                     key = key.strip()
                     value = value.strip()
                     if key == "DISCORD_OWNER_ID":
-                        allowed.add(int(value))
+                        try:
+                            allowed.add(int(value))
+                        except ValueError:
+                            pass
                     elif key == "DISCORD_ALLOWED_USERS":
                         for uid in value.split(","):
                             uid = uid.strip()
                             if uid:
-                                allowed.add(int(uid))
+                                try:
+                                    allowed.add(int(uid))
+                                except ValueError:
+                                    pass
     
     return allowed
 
@@ -98,7 +111,11 @@ def send_discord_message(user_id: int, text: str) -> bool:
     """
     global _discord_bot, _bot_event_loop
     
-    if _discord_bot is None:
+    with _state_lock:
+        bot = _discord_bot
+        loop = _bot_event_loop
+    
+    if bot is None:
         logger.warning("Discord bot not initialized")
         return False
     
@@ -115,7 +132,7 @@ def send_discord_message(user_id: int, text: str) -> bool:
         async def send():
             # 尝试通过 DM 发送
             try:
-                user = await _discord_bot.fetch_user(user_id)
+                user = await bot.fetch_user(user_id)
                 if user:
                     # Discord 消息限制 2000 字符
                     chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
@@ -127,7 +144,7 @@ def send_discord_message(user_id: int, text: str) -> bool:
                 logger.warning(f"Cannot DM user {user_id}: {e}")
             
             # 如果 DM 失败，尝试在服务器里找这个用户
-            for guild in _discord_bot.guilds:
+            for guild in bot.guilds:
                 try:
                     member = await guild.fetch_member(user_id)
                     if member:
@@ -148,9 +165,9 @@ def send_discord_message(user_id: int, text: str) -> bool:
             return False
         
         # 使用 bot 线程的事件循环
-        if _bot_event_loop is not None:
+        if loop is not None:
             # 在 bot 的事件循环中运行协程
-            future = asyncio.run_coroutine_threadsafe(send(), _bot_event_loop)
+            future = asyncio.run_coroutine_threadsafe(send(), loop)
             # 等待结果（最多 10 秒）
             try:
                 return future.result(timeout=10.0)
@@ -180,22 +197,28 @@ class DiscordBridge:
         self.intents.dm_messages = True
         self.intents.guild_messages = True
         
-        _discord_bot = commands.Bot(
-            command_prefix="!",
-            intents=self.intents,
-            help_command=None
-        )
+        # 使用锁保护全局变量修改
+        with _state_lock:
+            _discord_bot = commands.Bot(
+                command_prefix="!",
+                intents=self.intents,
+                help_command=None
+            )
         
         self._setup_events()
         self._setup_commands()
     
     def _setup_events(self):
         """设置事件处理器"""
+        global _discord_bot, _bot_event_loop
         
         @_discord_bot.event
         async def on_ready():
             global _bot_event_loop, _discord_bot
-            _bot_event_loop = asyncio.get_event_loop()
+            
+            with _state_lock:
+                _bot_event_loop = asyncio.get_event_loop()
+            
             _bot_ready_event.set()  # 标记 bot 已就绪
             
             allowed_users = _get_allowed_users()
@@ -209,6 +232,8 @@ class DiscordBridge:
         
         @_discord_bot.event
         async def on_message(message):
+            global _discord_bot
+            
             # 忽略机器人自己的消息
             if message.author == _discord_bot.user:
                 return
@@ -217,7 +242,7 @@ class DiscordBridge:
             if message.author.bot:
                 return
             
-            # 白名单检查（运行时动态获取）
+            # 白名单检查（运行动态获取）
             allowed_users = _get_allowed_users()
             if allowed_users and message.author.id not in allowed_users:
                 logger.warning(f"🚫 Blocked message from unauthorized user: {message.author} ({message.author.id})")
@@ -277,6 +302,7 @@ class DiscordBridge:
     
     def _setup_commands(self):
         """设置命令"""
+        global _discord_bot
         
         @_discord_bot.command(name="ping")
         async def ping(ctx):
@@ -287,7 +313,8 @@ class DiscordBridge:
         async def status(ctx):
             """显示详细状态"""
             allowed_users = _get_allowed_users()
-            status_text = f"""🟢 **大喷菇 Discord Bot**
+            status_text = f"""
+🟢 **大喷菇 Discord Bot**
             
 📡 状态：在线
 ⏱️ 延迟：{round(_discord_bot.latency * 1000)}ms
@@ -315,25 +342,49 @@ class DiscordBridge:
     
     def run(self):
         """运行机器人"""
+        global _discord_bot
+        
         token = _get_discord_token()
         if not token:
             raise ValueError("DISCORD_BOT_TOKEN not set")
         
         logger.info("🚀 Starting Discord bridge...")
-        _discord_bot.run(token)
+        
+        with _state_lock:
+            bot = _discord_bot
+        
+        if bot:
+            bot.run(token)
+        else:
+            raise RuntimeError("Discord bot not initialized")
     
     async def start_async(self):
         """异步启动"""
+        global _discord_bot
+        
         token = _get_discord_token()
         if not token:
             raise ValueError("DISCORD_BOT_TOKEN not set")
         
         logger.info("🚀 Starting Discord bridge (async mode)...")
-        await _discord_bot.start(token)
+        
+        with _state_lock:
+            bot = _discord_bot
+        
+        if bot:
+            await bot.start(token)
+        else:
+            raise RuntimeError("Discord bot not initialized")
     
     async def stop(self):
         """停止机器人"""
-        await _discord_bot.close()
+        global _discord_bot
+        
+        with _state_lock:
+            bot = _discord_bot
+        
+        if bot:
+            await bot.close()
 
 
 def create_bridge() -> DiscordBridge:
@@ -343,7 +394,8 @@ def create_bridge() -> DiscordBridge:
 
 def get_bot() -> Optional[commands.Bot]:
     """获取 bot 实例"""
-    return _discord_bot
+    with _state_lock:
+        return _discord_bot
 
 
 def is_bot_ready() -> bool:
