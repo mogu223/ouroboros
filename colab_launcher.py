@@ -39,13 +39,15 @@ try:
                 os.environ["DISCORD_OWNER_ID"] = discord_owner_id
             
             # Import and initialize Discord bridge
-            from ouroboros.channels.discord_bridge import DiscordBridge
+            from ouroboros.channels.discord_bridge import DiscordBridge, get_state
+            
+            # Create bridge instance (this initializes the singleton state)
+            DISCORD_BRIDGE = DiscordBridge()
             
             # Start Discord bot in background thread
             def start_discord_bot():
                 try:
-                    bridge = DiscordBridge()
-                    bridge.run()
+                    DISCORD_BRIDGE.run()
                 except Exception as e:
                     log.error(f"Discord bot error: {e}", exc_info=True)
             
