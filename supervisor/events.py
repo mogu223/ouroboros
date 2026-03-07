@@ -448,3 +448,9 @@ def dispatch(evt: Dict[str, Any], ctx: Any) -> None:
                     "error": repr(e),
                 },
             )
+
+
+
+def dispatch_event(evt: dict, ctx: object) -> None:
+    "Backward-compatible alias for launcher imports."
+    return dispatch(evt, ctx)
