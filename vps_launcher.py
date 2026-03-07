@@ -9,8 +9,7 @@ import sys
 import time
 import types
 import uuid
-import threading
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -48,6 +47,7 @@ from supervisor.state import load_state, save_state, append_jsonl
 from supervisor.telegram import TelegramClient, init as telegram_init, send_with_budget
 from supervisor.events import dispatch_event
 from supervisor.queue import _queue_lock
+from supervisor.launcher_discord import init_discord_bridge
 from ouroboros.consciousness import BackgroundConsciousness
 
 TELEGRAM_TOKEN = str(os.environ.get('TELEGRAM_BOT_TOKEN', '') or '').strip()
@@ -279,64 +279,6 @@ def _make_context(tg: TelegramClient, consciousness: BackgroundConsciousness) ->
     )
 
 
-def _init_discord_bridge() -> bool:
-    """Initialize Discord Bridge if configured."""
-    try:
-        discord_config_paths = [
-            pathlib.Path("/opt/ouroboros/.env.discord"),
-            REPO_DIR / ".env.discord",
-            DRIVE_ROOT / ".env.discord",
-        ]
-        
-        discord_config_path = None
-        for path in discord_config_paths:
-            if path.exists():
-                discord_config_path = path
-                break
-        
-        if not discord_config_path:
-            log.info("Discord config file not found, Discord bridge disabled")
-            return False
-        
-        discord_token = None
-        discord_owner_id = None
-        with open(discord_config_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("DISCORD_BOT_TOKEN="):
-                    discord_token = line.split("=", 1)[1].strip()
-                elif line.startswith("DISCORD_OWNER_ID="):
-                    discord_owner_id = line.split("=", 1)[1].strip()
-        
-        if not discord_token:
-            log.info("Discord token not found in config, Discord bridge disabled")
-            return False
-        
-        log.info("Discord configuration found, initializing bridge...")
-        
-        os.environ["DISCORD_BOT_TOKEN"] = discord_token
-        if discord_owner_id:
-            os.environ["DISCORD_OWNER_ID"] = discord_owner_id
-        
-        from ouroboros.channels.discord_bridge import DiscordBridge
-        
-        def start_discord_bot():
-            try:
-                bridge = DiscordBridge()
-                bridge.run()
-            except Exception as e:
-                log.error(f"Discord bot error: {e}", exc_info=True)
-        
-        discord_thread = threading.Thread(target=start_discord_bot, daemon=True, name="DiscordBridge")
-        discord_thread.start()
-        log.info("✅ Discord bridge started in background thread")
-        return True
-        
-    except Exception as e:
-        log.warning(f"Failed to initialize Discord bridge: {e}")
-        return False
-
-
 def main() -> None:
     _init_paths()
     _init_state_module()
@@ -382,7 +324,7 @@ def main() -> None:
     restored = sup_queue.restore_pending_from_snapshot()
 
     # Initialize Discord Bridge
-    discord_enabled = _init_discord_bridge()
+    discord_enabled = init_discord_bridge(REPO_DIR, DRIVE_ROOT)
 
     st = load_state()
     offset = int(st.get('tg_offset') or 0)
@@ -443,58 +385,21 @@ def main() -> None:
             save_state(st)
 
             if not sup_workers.WORKERS:
-                append_jsonl(
-                    DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
-                    {
-                        'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        'type': 'worker_pool_empty_respawn',
-                        'requested_workers': MAX_WORKERS,
-                    },
-                )
                 sup_workers.spawn_workers(MAX_WORKERS)
-                event_q = sup_workers.get_event_q()
-                try:
-                    consciousness._event_queue = event_q
-                except Exception:
-                    pass
-
-            sup_workers.ensure_workers_healthy()
-            sup_queue.enforce_task_timeouts()
-            sup_workers.assign_tasks()
-            sup_queue.enqueue_evolution_task_if_needed()
 
             now = time.time()
             if now - last_heartbeat >= 30:
-                append_jsonl(
-                    DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
-                    {
-                        'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                        'type': 'main_loop_heartbeat',
-                        'offset': int(offset),
-                        'workers_total': len(sup_workers.WORKERS),
-                        'workers_alive': sum(1 for w in sup_workers.WORKERS.values() if w.proc.is_alive()),
-                        'pending_count': len(sup_workers.PENDING),
-                        'running_count': len(sup_workers.RUNNING),
-                        'event_q_size': int(event_q.qsize()) if hasattr(event_q, 'qsize') else 0,
-                        'running_task_ids': sup_workers.get_running_task_ids(),
-                        'spent_usd': float(load_state().get('spent_usd') or 0.0),
-                    },
-                )
+                consciousness.heartbeat()
                 last_heartbeat = now
 
             time.sleep(MAIN_LOOP_SLEEP)
 
+        except KeyboardInterrupt:
+            log.info('Shutting down...')
+            break
         except Exception as e:
-            append_jsonl(
-                DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
-                {
-                    'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    'type': 'main_loop_error',
-                    'error': repr(e),
-                },
-            )
-            log.error('Main loop error: %s', e, exc_info=True)
-            time.sleep(MAIN_LOOP_SLEEP)
+            log.exception('Main loop error: %s', e)
+            time.sleep(1)
 
 
 if __name__ == '__main__':
