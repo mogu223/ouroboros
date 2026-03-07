@@ -387,8 +387,6 @@ class OuroborosAgent:
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
-            drive_logs=drive_logs,
-            task_id=task.get("id", "unknown"),
         )
         self.tools.set_context(ctx)
 
@@ -493,4 +491,5 @@ def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> Ourob
 
 # Alias for backward compatibility
 OuroborosAgent.handle_task = OuroborosAgent.run_task
+
 
