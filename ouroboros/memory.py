@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,25 @@ class Memory:
     def __init__(self, drive_root: pathlib.Path, repo_dir: Optional[pathlib.Path] = None):
         self.drive_root = drive_root
         self.repo_dir = repo_dir
+
+    # --- Config helper (integrated, not runtime patch) ---
+
+    def get_config(self, key: str, default=None):
+        """Read config from environment variables (OUROBOROS_* prefix)."""
+        try:
+            env_key = 'OUROBOROS_' + str(key or '').strip().upper()
+            raw = os.environ.get(env_key)
+            if raw is None or str(raw).strip() == '':
+                return default
+            if isinstance(default, bool):
+                return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+            if isinstance(default, int):
+                return int(str(raw).strip())
+            if isinstance(default, float):
+                return float(str(raw).strip())
+            return raw
+        except Exception:
+            return default
 
     # --- Paths ---
 
@@ -242,24 +262,3 @@ class Memory:
             "This file is read at every dialogue and influences my responses.\n"
             "I update it when I feel the need, via drive_write.\n"
         )
-
-# --- runtime compatibility patch ---
-def _compat_memory_get_config(self, key: str, default=None):
-    import os
-    try:
-        env_key = 'OUROBOROS_' + str(key or '').strip().upper()
-        raw = os.environ.get(env_key)
-        if raw is None or str(raw).strip() == '':
-            return default
-        if isinstance(default, bool):
-            return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
-        if isinstance(default, int):
-            return int(str(raw).strip())
-        if isinstance(default, float):
-            return float(str(raw).strip())
-        return raw
-    except Exception:
-        return default
-
-Memory.get_config = _compat_memory_get_config
-# --- end runtime compatibility patch ---
