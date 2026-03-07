@@ -490,3 +490,7 @@ def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> Ourob
     )
     return OuroborosAgent(env=env, event_queue=event_queue)
 
+
+# Alias for backward compatibility
+OuroborosAgent.handle_task = OuroborosAgent.run_task
+
