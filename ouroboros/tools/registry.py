@@ -157,7 +157,7 @@ class ToolRegistry:
         # Core tools + meta-tools for discovering/enabling extended tools
         result = []
         for e in self._entries.values():
-            if e.name in CORE_TOOL_NAMES:
+            if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
                 result.append({"type": "function", "function": e.schema})
         return result
 
