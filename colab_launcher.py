@@ -39,7 +39,7 @@ try:
                 os.environ["DISCORD_OWNER_ID"] = discord_owner_id
             
             # Import and initialize Discord bridge
-            from ouroboros.channels.discord_bridge import DiscordBridge, get_state
+            from ouroboros.channels.discord_bridge import DiscordBridge
             
             # Create bridge instance (this initializes the singleton state)
             DISCORD_BRIDGE = DiscordBridge()
