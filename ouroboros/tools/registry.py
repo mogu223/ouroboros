@@ -76,18 +76,36 @@ class ToolEntry:
     timeout_sec: int = 120
 
 
+# Core tools always available in the active tool set
+# These are the fundamental capabilities for self-creation and operation
 CORE_TOOL_NAMES = {
+    # File operations
     "repo_read", "repo_list", "repo_write_commit", "repo_commit_push",
     "drive_read", "drive_list", "drive_write",
-    "run_shell", "claude_code_edit",
+    # Git operations
     "git_status", "git_diff",
+    # Execution
+    "run_shell",
+    # Task management
     "schedule_task", "wait_for_task", "get_task_result",
+    # Memory & identity
     "update_scratchpad", "update_identity",
-    "chat_history", "web_search",
+    "chat_history", "chat_history_layered",
+    "update_memory_point", "get_memory_points",
+    # Communication
     "send_owner_message", "switch_model",
+    # System control
     "request_restart", "promote_to_stable",
-    "knowledge_read", "knowledge_write",
-    "browse_page", "browser_action", "analyze_screenshot",
+    # Knowledge
+    "knowledge_read", "knowledge_write", "knowledge_list",
+    # Web & search
+    "web_search",
+    # Browser automation
+    "browse_page", "browser_action", "send_photo",
+    # Vision
+    "analyze_screenshot", "vlm_query",
+    # Meta-tools for tool discovery
+    "list_available_tools", "enable_tools",
 }
 
 
@@ -139,7 +157,7 @@ class ToolRegistry:
         # Core tools + meta-tools for discovering/enabling extended tools
         result = []
         for e in self._entries.values():
-            if e.name in CORE_TOOL_NAMES or e.name in ("list_available_tools", "enable_tools"):
+            if e.name in CORE_TOOL_NAMES:
                 result.append({"type": "function", "function": e.schema})
         return result
 
