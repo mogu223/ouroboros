@@ -26,13 +26,42 @@ _bot_event_loop: Optional[asyncio.AbstractEventLoop] = None
 _bot_ready_event = threading.Event()  # 用于等待 bot 就绪
 _pending_responses: Dict[str, asyncio.Future] = {}
 
-def load_config():
-    """从配置文件加载 Token 和白名单"""
-    config = {
-        "token": os.getenv("DISCORD_BOT_TOKEN"),
-        "allowed_users": set()
-    }
+
+def _get_discord_token() -> Optional[str]:
+    """从环境变量或配置文件获取 Discord Token"""
+    # 优先从环境变量获取
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if token:
+        return token
     
+    # 从配置文件获取
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DISCORD_BOT_TOKEN=") and not line.startswith("#"):
+                    return line.split("=", 1)[1].strip()
+    
+    return None
+
+
+def _get_allowed_users() -> set:
+    """从环境变量或配置文件获取允许的用户列表"""
+    allowed = set()
+    
+    # 从环境变量获取
+    owner_id = os.getenv("DISCORD_OWNER_ID")
+    if owner_id:
+        allowed.add(int(owner_id))
+    
+    allowed_users = os.getenv("DISCORD_ALLOWED_USERS")
+    if allowed_users:
+        for uid in allowed_users.split(","):
+            uid = uid.strip()
+            if uid:
+                allowed.add(int(uid))
+    
+    # 从配置文件获取
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "r") as f:
             for line in f:
@@ -41,22 +70,15 @@ def load_config():
                     key, value = line.split("=", 1)
                     key = key.strip()
                     value = value.strip()
-                    if key == "DISCORD_BOT_TOKEN":
-                        config["token"] = value
-                    elif key == "DISCORD_OWNER_ID":
-                        config["allowed_users"].add(int(value))
+                    if key == "DISCORD_OWNER_ID":
+                        allowed.add(int(value))
                     elif key == "DISCORD_ALLOWED_USERS":
                         for uid in value.split(","):
                             uid = uid.strip()
                             if uid:
-                                config["allowed_users"].add(int(uid))
+                                allowed.add(int(uid))
     
-    return config
-
-# 加载配置
-CONFIG = load_config()
-DISCORD_TOKEN = CONFIG["token"]
-ALLOWED_USER_IDS = CONFIG["allowed_users"]
+    return allowed
 
 
 # 存储活跃的对话上下文
@@ -176,10 +198,12 @@ class DiscordBridge:
             _bot_event_loop = asyncio.get_event_loop()
             _bot_ready_event.set()  # 标记 bot 已就绪
             
+            allowed_users = _get_allowed_users()
+            
             logger.info(f"🟢 Discord bot logged in as {_discord_bot.user}")
             logger.info(f"📡 Connected to {len(_discord_bot.guilds)} guilds")
-            if ALLOWED_USER_IDS:
-                logger.info(f"🔐 Whitelist mode: {len(ALLOWED_USER_IDS)} allowed user(s)")
+            if allowed_users:
+                logger.info(f"🔐 Whitelist mode: {len(allowed_users)} allowed user(s)")
             else:
                 logger.info(f"🌐 Open mode: all users can interact")
         
@@ -193,8 +217,9 @@ class DiscordBridge:
             if message.author.bot:
                 return
             
-            # 白名单检查
-            if ALLOWED_USER_IDS and message.author.id not in ALLOWED_USER_IDS:
+            # 白名单检查（运行时动态获取）
+            allowed_users = _get_allowed_users()
+            if allowed_users and message.author.id not in allowed_users:
                 logger.warning(f"🚫 Blocked message from unauthorized user: {message.author} ({message.author.id})")
                 return
             
@@ -261,12 +286,13 @@ class DiscordBridge:
         @_discord_bot.command(name="status")
         async def status(ctx):
             """显示详细状态"""
+            allowed_users = _get_allowed_users()
             status_text = f"""🟢 **大喷菇 Discord Bot**
             
 📡 状态：在线
 ⏱️ 延迟：{round(_discord_bot.latency * 1000)}ms
 🏠 服务器数：{len(_discord_bot.guilds)}
-🔐 模式：{"白名单" if ALLOWED_USER_IDS else "公开"}
+🔐 模式：{"白名单" if allowed_users else "公开"}
             """
             await ctx.send(status_text)
         
@@ -289,19 +315,21 @@ class DiscordBridge:
     
     def run(self):
         """运行机器人"""
-        if not DISCORD_TOKEN:
+        token = _get_discord_token()
+        if not token:
             raise ValueError("DISCORD_BOT_TOKEN not set")
         
         logger.info("🚀 Starting Discord bridge...")
-        _discord_bot.run(DISCORD_TOKEN)
+        _discord_bot.run(token)
     
     async def start_async(self):
         """异步启动"""
-        if not DISCORD_TOKEN:
+        token = _get_discord_token()
+        if not token:
             raise ValueError("DISCORD_BOT_TOKEN not set")
         
         logger.info("🚀 Starting Discord bridge (async mode)...")
-        await _discord_bot.start(DISCORD_TOKEN)
+        await _discord_bot.start(token)
     
     async def stop(self):
         """停止机器人"""
@@ -324,9 +352,11 @@ def is_bot_ready() -> bool:
 
 
 if __name__ == "__main__":
+    token = _get_discord_token()
+    allowed = _get_allowed_users()
     print(f"Discord Bridge - Standalone Mode")
-    print(f"Token loaded: {'Yes' if DISCORD_TOKEN else 'No'}")
-    print(f"Allowed users: {ALLOWED_USER_IDS if ALLOWED_USER_IDS else 'All'}")
+    print(f"Token loaded: {'Yes' if token else 'No'}")
+    print(f"Allowed users: {allowed if allowed else 'All'}")
     
     bridge = create_bridge()
     bridge.run()
