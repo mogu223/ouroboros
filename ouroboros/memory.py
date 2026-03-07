@@ -242,3 +242,24 @@ class Memory:
             "This file is read at every dialogue and influences my responses.\n"
             "I update it when I feel the need, via drive_write.\n"
         )
+
+# --- runtime compatibility patch ---
+def _compat_memory_get_config(self, key: str, default=None):
+    import os
+    try:
+        env_key = 'OUROBOROS_' + str(key or '').strip().upper()
+        raw = os.environ.get(env_key)
+        if raw is None or str(raw).strip() == '':
+            return default
+        if isinstance(default, bool):
+            return str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+        if isinstance(default, int):
+            return int(str(raw).strip())
+        if isinstance(default, float):
+            return float(str(raw).strip())
+        return raw
+    except Exception:
+        return default
+
+Memory.get_config = _compat_memory_get_config
+# --- end runtime compatibility patch ---
