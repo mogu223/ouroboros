@@ -448,5 +448,3 @@ def dispatch(evt: Dict[str, Any], ctx: Any) -> None:
                     "error": repr(e),
                 },
             )
-    else:
-        log.debug(f"Unknown event type: {etype}")
