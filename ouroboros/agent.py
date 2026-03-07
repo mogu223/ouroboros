@@ -677,3 +677,9 @@ def make_agent(repo_dir: str, drive_root: str, event_queue=None):
     env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
     return OuroborosAgent(env, event_queue=event_queue)
 # --- end compatibility patch ---
+
+def _compat_emit_progress(self, text):
+    return self._send_progress_message(text)
+
+
+OuroborosAgent._emit_progress = _compat_emit_progress
