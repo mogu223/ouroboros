@@ -369,6 +369,10 @@ def _compat_chat(
     if alias_effort is not None:
         reasoning_effort = alias_effort
 
+    # Fix: model could be a list from fallback logic, extract first element
+    if isinstance(model, list):
+        model = model[0] if model else None
+
     return self.call(
         messages=messages,
         model=model or self.model,
