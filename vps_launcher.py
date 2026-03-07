@@ -5,6 +5,7 @@ import logging
 import os
 import pathlib
 import queue
+import subprocess
 import sys
 import time
 import types
@@ -107,6 +108,26 @@ def _update_budget_from_usage(usage: Dict[str, Any]) -> None:
     st['spent_tokens_cached'] = int(st.get('spent_tokens_cached') or 0) + int(usage.get('cached_tokens') or 0)
     st['spent_usd'] = float(st.get('spent_usd') or 0.0) + float(usage.get('cost') or 0.0)
     save_state(st)
+
+
+def _refresh_current_sha() -> None:
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=str(REPO_DIR),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        sha = str(result.stdout or '').strip()
+        if not sha:
+            return
+        st = load_state()
+        st['current_sha'] = sha
+        save_state(st)
+    except Exception:
+        log.warning('Failed to refresh current_sha from local git HEAD', exc_info=True)
 
 
 def _owner_chat_id() -> Optional[int]:
@@ -335,6 +356,7 @@ def main() -> None:
         branch_dev=BRANCH_DEV,
         branch_stable=BRANCH_STABLE,
     )
+    _refresh_current_sha()
 
     tg = TelegramClient(TELEGRAM_TOKEN)
     telegram_init(
