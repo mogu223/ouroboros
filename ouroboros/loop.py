@@ -435,23 +435,32 @@ async def _call_llm_with_resilience(
             continue
         
         try:
-            # Call LLM
-            response_content, response_tool_calls, usage_stats = await llm.chat(
+            # Call LLM (sync API, compatibility with OpenAI-compatible client)
+            response_msg, usage_stats = llm.chat(
                 messages=messages,
                 model=model_name,
-                tool_schemas=tools.schemas(),
-                effort=active_effort,
-                allow_retries=False, # Retries handled by this function
+                tools=tools.schemas(),
+                reasoning_effort=active_effort,
             )
+
+            response_content = None
+            response_tool_calls: List[Dict[str, Any]] = []
+            if isinstance(response_msg, dict):
+                response_content = response_msg.get("content")
+                raw_tool_calls = response_msg.get("tool_calls") or []
+                if isinstance(raw_tool_calls, dict):
+                    raw_tool_calls = [raw_tool_calls]
+                if isinstance(raw_tool_calls, list):
+                    response_tool_calls = raw_tool_calls
 
             # Treat empty response or EmptyResponseError as failure
             if response_content is None and not response_tool_calls:
                 raise EmptyResponseError(f"Model '{model_name}' returned an empty response.")
-            
+
             # Record success and return response
             circuit_breaker.record_success(model_name)
             llm_trace["model_used"] = model_name
-            add_usage(llm_trace, model_name, usage_stats) # Add usage from successful call
+            add_usage(llm_trace.setdefault("usage", {}), usage_stats)
             return response_content, response_tool_calls
 
         except EmptyResponseError as e:
