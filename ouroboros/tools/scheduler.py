@@ -213,7 +213,7 @@ def mark_reminder_sent(reminder_id: str) -> None:
 
 # --- Registry ---
 
-def get_tools():
+def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("schedule_reminder", {
             "name": "schedule_reminder",
