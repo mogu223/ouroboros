@@ -20,6 +20,9 @@ from typing import Any, Dict, Optional
 
 log = logging.getLogger(__name__)
 
+# Evolution circuit breaker threshold - single source of truth
+EVOLUTION_FAILURE_THRESHOLD = 100
+
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage = evt.get("usage") or {}
@@ -148,6 +151,19 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     "rounds": rounds,
                 },
             )
+            
+            # Check if we've hit the threshold - use the code constant, not state
+            if failures >= EVOLUTION_FAILURE_THRESHOLD:
+                st["evolution_mode_enabled"] = False
+                ctx.save_state(st)
+                ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
+                ctx.sort_pending()
+                ctx.persist_queue_snapshot(reason="evolution_circuit_breaker")
+                if st.get("owner_chat_id"):
+                    ctx.send_with_budget(
+                        int(st["owner_chat_id"]),
+                        f"🧬⚠️ Evolution paused: {failures} consecutive failures. Use /evolve start to resume after investigating the issue.",
+                    )
 
     if task_id:
         ctx.RUNNING.pop(str(task_id), None)
@@ -361,6 +377,11 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     enabled = bool(evt.get("enabled"))
     st = ctx.load_state()
     st["evolution_mode_enabled"] = enabled
+    
+    # When enabling, reset the failure counter to ensure fresh start
+    if enabled:
+        st["evolution_consecutive_failures"] = 0
+    
     ctx.save_state(st)
     if not enabled:
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
@@ -379,61 +400,46 @@ def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
     elif action in ("stop", "off"):
         result = ctx.consciousness.stop()
     else:
-        status = "running" if ctx.consciousness.is_running else "stopped"
-        result = f"Background consciousness: {status}"
+        result = ctx.consciousness.status()
     st = ctx.load_state()
     if st.get("owner_chat_id"):
-        ctx.send_with_budget(int(st["owner_chat_id"]), f"🧠 {result}")
+        ctx.send_with_budget(int(st["owner_chat_id"]), f"🧠 Consciousness: {result}")
 
 
-def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
-    """Send a photo (base64 PNG) to a Telegram chat."""
-    import base64 as b64mod
-    try:
-        chat_id = int(evt.get("chat_id") or 0)
-        image_b64 = str(evt.get("image_base64") or "")
-        caption = str(evt.get("caption") or "")
-        if not chat_id or not image_b64:
-            return
-        photo_bytes = b64mod.b64decode(image_b64)
-        ok, err = ctx.TG.send_photo(chat_id, photo_bytes, caption=caption)
-        if not ok:
-            ctx.append_jsonl(
-                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    "type": "send_photo_error",
-                    "chat_id": chat_id, "error": err,
-                },
-            )
-    except Exception as e:
-        ctx.append_jsonl(
-            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "send_photo_event_error", "error": repr(e),
-            },
+def _handle_switch_model(evt: Dict[str, Any], ctx: Any) -> None:
+    """Handle model switch event from worker."""
+    model = str(evt.get("model") or "").strip()
+    effort = str(evt.get("effort") or "").strip()
+    st = ctx.load_state()
+    if model:
+        st["current_model"] = model
+    if effort:
+        st["current_effort"] = effort
+    ctx.save_state(st)
+    if st.get("owner_chat_id"):
+        ctx.send_with_budget(
+            int(st["owner_chat_id"]),
+            f"🔄 Model: {model or '(no change)'} | Effort: {effort or '(no change)'}"
         )
 
 
-def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
-    """Log owner_message_injected to events.jsonl for health invariant #5 (duplicate processing)."""
-    from ouroboros.utils import utc_now_iso
-    try:
-        ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
-            "ts": evt.get("ts", utc_now_iso()),
-            "type": "owner_message_injected",
-            "task_id": evt.get("task_id", ""),
-            "text": evt.get("text", "")[:200],
-        })
-    except Exception:
-        log.warning("Failed to log owner_message_injected event", exc_info=True)
+def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
+    """Dispatch an event from worker EVENT_Q to the appropriate handler."""
+    etype = str(evt.get("type") or "").strip()
+    if not etype:
+        return
+
+    handler = _EVENT_HANDLERS.get(etype)
+    if handler:
+        try:
+            handler(evt, ctx)
+        except Exception as e:
+            log.warning("Event handler failed for type=%s: %s", etype, e)
+    else:
+        log.debug("No handler for event type: %s", etype)
 
 
-# ---------------------------------------------------------------------------
-# Dispatch table
-# ---------------------------------------------------------------------------
-EVENT_HANDLERS = {
+_EVENT_HANDLERS: Dict[str, Any] = {
     "llm_usage": _handle_llm_usage,
     "task_heartbeat": _handle_task_heartbeat,
     "typing_start": _handle_typing_start,
@@ -445,62 +451,7 @@ EVENT_HANDLERS = {
     "promote_to_stable": _handle_promote_to_stable,
     "schedule_task": _handle_schedule_task,
     "cancel_task": _handle_cancel_task,
-    "send_photo": _handle_send_photo,
     "toggle_evolution": _handle_toggle_evolution,
     "toggle_consciousness": _handle_toggle_consciousness,
-    "owner_message_injected": _handle_owner_message_injected,
+    "switch_model": _handle_switch_model,
 }
-
-
-def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
-    """Dispatch a single worker event to its handler."""
-    if not isinstance(evt, dict):
-        ctx.append_jsonl(
-            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "invalid_worker_event",
-                "error": "event is not dict",
-                "event_repr": repr(evt)[:1000],
-            },
-        )
-        return
-
-    event_type = str(evt.get("type") or "").strip()
-    if not event_type:
-        ctx.append_jsonl(
-            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "invalid_worker_event",
-                "error": "missing event.type",
-                "event_repr": repr(evt)[:1000],
-            },
-        )
-        return
-
-    handler = EVENT_HANDLERS.get(event_type)
-    if handler is None:
-        ctx.append_jsonl(
-            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "unknown_worker_event",
-                "event_type": event_type,
-                "event_repr": repr(evt)[:1000],
-            },
-        )
-        return
-
-    try:
-        handler(evt, ctx)
-    except Exception as e:
-        ctx.append_jsonl(
-            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "type": "worker_event_handler_error",
-                "event_type": event_type,
-                "error": repr(e),
-            },
-        )
