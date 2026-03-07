@@ -348,3 +348,35 @@ class LLMClient:
     def available_models(self) -> List[str]:
         """Return all available models (for switch_model tool schema)."""
         return get_all_available_models()
+
+# --- runtime compatibility patch ---
+# _compat_chat_signature
+def _compat_chat(
+    self,
+    messages,
+    model=None,
+    tools=None,
+    reasoning_effort='medium',
+    max_tokens=16384,
+    tool_choice='auto',
+    **kwargs,
+):
+    alias_tools = kwargs.get('tool_schemas')
+    if tools is None and alias_tools is not None:
+        tools = alias_tools
+
+    alias_effort = kwargs.get('effort')
+    if alias_effort is not None:
+        reasoning_effort = alias_effort
+
+    return self.call(
+        messages=messages,
+        model=model or self.model,
+        tools=tools,
+        effort=reasoning_effort,
+        max_tokens=max_tokens,
+        tool_choice=tool_choice,
+    )
+
+LLMClient.chat = _compat_chat
+# --- end runtime compatibility patch ---

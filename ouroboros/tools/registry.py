@@ -207,3 +207,17 @@ class ToolRegistry:
     @property
     def CODE_TOOLS(self) -> frozenset:
         return frozenset(e.name for e in self._entries.values() if e.is_code_tool)
+
+# --- runtime compatibility patch ---
+# _compat_null_browser
+class _CompatNullBrowser:
+    stateful_executor = None
+
+
+def _compat_browser_prop(self):
+    return _CompatNullBrowser()
+
+
+if not hasattr(ToolRegistry, 'browser'):
+    ToolRegistry.browser = property(_compat_browser_prop)
+# --- end runtime compatibility patch ---
