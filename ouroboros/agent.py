@@ -518,7 +518,11 @@ class OuroborosAgent:
             if begin >= 0 and end >= begin:
                 end += len("*** End Patch")
                 patch = s[begin:end].strip()
-                if patch:
+                if patch and any(marker in patch for marker in (
+                    "*** Update File:",
+                    "*** Add File:",
+                    "*** Delete File:",
+                )):
                     return patch + "\n"
             return None
 
