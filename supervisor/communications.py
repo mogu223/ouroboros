@@ -83,7 +83,10 @@ def send_photo(chat_id: Union[int, str], photo_bytes: bytes, caption: str = "") 
 
 def _get_platform(chat_id: Union[int, str]) -> str:
     """Determine platform from chat_id."""
+    # Discord chat_id uses negative prefix: -1000000000000 - user_id
     if isinstance(chat_id, int):
+        if chat_id < -1000000000000:
+            return "discord"
         return "telegram"
     
     chat_id_str = str(chat_id)
@@ -92,9 +95,11 @@ def _get_platform(chat_id: Union[int, str]) -> str:
     elif chat_id_str.startswith("tg_"):
         return "telegram"
     else:
-        # Try to parse as int (legacy Telegram format)
+        # Try to parse as int (legacy Telegram format or Discord negative ID)
         try:
-            int(chat_id_str)
+            id_val = int(chat_id_str)
+            if id_val < -1000000000000:
+                return "discord"
             return "telegram"
         except ValueError:
             return "unknown"
@@ -102,7 +107,11 @@ def _get_platform(chat_id: Union[int, str]) -> str:
 
 def _extract_id(chat_id: Union[int, str], prefix: str = None) -> Optional[int]:
     """Extract numeric ID from chat_id."""
+    # Handle Discord negative ID format: -1000000000000 - user_id
     if isinstance(chat_id, int):
+        if chat_id < -1000000000000:
+            # Convert back: user_id = -1000000000000 - chat_id
+            return -1000000000000 - chat_id
         return chat_id
     
     chat_id_str = str(chat_id)
@@ -121,7 +130,11 @@ def _extract_id(chat_id: Union[int, str], prefix: str = None) -> Optional[int]:
             chat_id_str = chat_id_str[8:]
         
         try:
-            return int(chat_id_str)
+            id_val = int(chat_id_str)
+            # Handle negative Discord ID
+            if id_val < -1000000000000:
+                return -1000000000000 - id_val
+            return id_val
         except ValueError:
             return None
 
@@ -151,3 +164,4 @@ def _send_discord(chat_id: str, text: str) -> Tuple[bool, str]:
     except Exception as e:
         log.warning("Failed to send Discord message", exc_info=True)
         return False, str(e)
+

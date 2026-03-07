@@ -56,7 +56,7 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
             images=[{"base64": b64, "mime": "image/png"}],
             model=vlm_model,
             max_tokens=1024,
-            reasoning_effort="low",
+            effort="low",
         )
 
         # Emit usage event if event_queue is available
@@ -90,7 +90,7 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
             images=images,
             model=vlm_model,
             max_tokens=1024,
-            reasoning_effort="low",
+            effort="low",
         )
 
         _emit_usage(ctx, usage, vlm_model)
@@ -191,3 +191,4 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=30,
         ),
     ]
+

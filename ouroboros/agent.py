@@ -124,6 +124,13 @@ class OuroborosAgent:
         # SSOT modules
         self.llm = LLMClient()
         self.tools = ToolRegistry(repo_dir=env.repo_dir, drive_root=env.drive_root)
+        
+        # Set LLM client for codex tool handler
+        try:
+            from ouroboros.tools.codex_edit import set_llm_client
+            set_llm_client(self.llm)
+        except ImportError:
+            log.debug("codex_edit module not found, handler will use default LLM client")
         self.memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
 
         self._log_worker_boot_once()
@@ -468,3 +475,18 @@ class OuroborosAgent:
 
     def get_current_task_type(self) -> Optional[str]:
         return self._current_task_type
+
+
+
+# ---------------------------------------------------------------------------
+# Factory function
+# ---------------------------------------------------------------------------
+
+def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
+    """Factory function to create an OuroborosAgent instance."""
+    env = Env(
+        repo_dir=pathlib.Path(repo_dir),
+        drive_root=pathlib.Path(drive_root),
+    )
+    return OuroborosAgent(env=env, event_queue=event_queue)
+

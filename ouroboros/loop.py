@@ -635,10 +635,12 @@ async def run_tool_loop(
         "assistant_notes": [],
         "errors": [],
         "model_used": None,
+        "progress_hash_history": [],  # For deadlock detection
+        "consecutive_empty_responses": 0,  # Track empty responses
     }
 
     iteration_guardian = get_iteration_guardian()
-    iteration_guardian.enter_iteration() # For debugging recursion/infinite loops
+    iteration_guardian.enter_iteration()
 
     # Initialize circuit breaker and fallback models
     circuit_breaker = get_circuit_breaker()
@@ -649,16 +651,24 @@ async def run_tool_loop(
         for round_idx in range(max_iterations):
             llm_trace["round"] = round_idx + 1
 
+            # Wall-time timeout check (only for non-evolution tasks)
+            is_evolution = task_type.lower() == "evolution"
             if max_wall_time_sec and (time.time() - loop_started_ts) >= float(max_wall_time_sec):
-                timeout_msg = (
-                    f"Task exceeded {int(max_wall_time_sec)}s wall-time limit and was stopped early. "
-                    "Please split the request into smaller steps."
-                )
-                llm_trace["error"] = timeout_msg
-                llm_trace["assistant_notes"].append("task_wall_time_exceeded")
-                log.warning("Task %s exceeded wall-time limit: %ss", task_id, max_wall_time_sec)
-                emit_progress(timeout_msg)
-                return timeout_msg, accumulated_usage, llm_trace
+                if is_evolution:
+                    # For evolution: log warning but continue, don't abort
+                    log.warning("Evolution task %s exceeded wall-time limit but continuing...", task_id)
+                    emit_progress(f"⏱️ 进化任务超时，继续执行中... (Round {round_idx + 1})")
+                    max_wall_time_sec = 0  # Disable further timeout checks
+                else:
+                    timeout_msg = (
+                        f"Task exceeded {int(max_wall_time_sec)}s wall-time limit and was stopped early. "
+                        "Please split the request into smaller steps."
+                    )
+                    llm_trace["error"] = timeout_msg
+                    llm_trace["assistant_notes"].append("task_wall_time_exceeded")
+                    log.warning("Task %s exceeded wall-time limit: %ss", task_id, max_wall_time_sec)
+                    emit_progress(timeout_msg)
+                    return timeout_msg, accumulated_usage, llm_trace
 
             # Check iteration guardian (e.g., max depth)
             if iteration_guardian.should_abort():
@@ -685,10 +695,9 @@ async def run_tool_loop(
                 task_type=task_type,
             )
             if budget_status_or_error:
-                # _check_budget_limits returns a tuple (error_msg, usage, trace)
                 return budget_status_or_error
 
-            emit_progress(f"🔄 LLM Thinking... (Round {round_idx + 1})")
+            emit_progress(f"🔄 LLM Thinking... (Round {round_idx + 1}/{max_iterations})")
 
             # --- LLM Call with Resilience ---
             try:
@@ -722,15 +731,23 @@ async def run_tool_loop(
             # --- End LLM Call with Resilience ---
 
             if not response_content and not tool_calls:
-                # This should ideally be caught by _call_llm_with_resilience,
-                # but as a safeguard, we log it and continue to next iteration
-                # if there were no errors from _call_llm_with_resilience
-                log.warning("LLM returned an empty response and no tool calls, continuing...")
-                llm_trace["assistant_notes"].append("LLM returned empty, continuing.")
-                # If _call_llm_with_resilience returned nothing without raising, it means
-                # it ran out of models or they are all blocked. The above `except RuntimeError`
-                # should handle this. This check is mostly defensive.
+                # Empty response - just log and continue, don't abort
+                # Evolution tasks may have phases where LLM is thinking internally
+                llm_trace["consecutive_empty_responses"] = llm_trace.get("consecutive_empty_responses", 0) + 1
+                log.warning("LLM returned empty response (count: %d), continuing...",
+                           llm_trace["consecutive_empty_responses"])
+                llm_trace["assistant_notes"].append(f"empty_response_#{llm_trace['consecutive_empty_responses']}")
+
+                # Only abort after many empty responses (not 3)
+                if llm_trace["consecutive_empty_responses"] >= 10:
+                    log.warning("Task %s: too many empty responses, aborting", task_id)
+                    emit_progress("⚠️ 连续 10 次空响应，任务终止。")
+                    return "连续空响应过多，任务终止。", accumulated_usage, llm_trace
+
                 continue
+
+            # Reset empty response counter on non-empty response
+            llm_trace["consecutive_empty_responses"] = 0
 
             # Process tool calls if any
             if tool_calls:
@@ -770,3 +787,13 @@ async def run_tool_loop(
 
     finally:
         iteration_guardian.exit_iteration() # Ensure iteration guardian state is cleaned up
+
+# Alias for backward compatibility
+run_llm_tool_loop = run_tool_loop
+
+__all__ = [
+    "run_tool_loop",
+    "run_llm_tool_loop",
+]
+
+

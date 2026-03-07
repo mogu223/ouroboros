@@ -178,8 +178,8 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
             },
         )
         try:
-            from supervisor.telegram import get_tg
-            get_tg().send_message(chat_id, err_msg)
+            from supervisor.communications import send_message
+            send_message(chat_id, err_msg)
         except Exception:
             log.debug("Suppressed exception", exc_info=True)
 
@@ -626,5 +626,6 @@ def ensure_workers_healthy() -> None:
         # Kill all workers — direct chat via handle_chat_direct still works
         kill_workers()
         CRASH_TS.clear()
+
 
 

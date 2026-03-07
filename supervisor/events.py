@@ -76,10 +76,20 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         is_progress = bool(evt.get("is_progress"))
         
         # Check if this is a Discord message
+        # Discord uses negative ID format: -1000000000000 - user_id
+        is_discord = False
+        user_id = None
+        
         if isinstance(chat_id_raw, str) and chat_id_raw.startswith("discord_"):
+            is_discord = True
+            user_id = int(chat_id_raw.replace("discord_", ""))
+        elif isinstance(chat_id_raw, int) and chat_id_raw < -1000000000000:
+            is_discord = True
+            user_id = -1000000000000 - chat_id_raw
+        
+        if is_discord and user_id is not None:
             # Discord message
             try:
-                user_id = int(chat_id_raw.replace("discord_", ""))
                 from ouroboros.channels.discord_bridge import send_discord_message
                 ok = send_discord_message(user_id, text)
                 if not ok:
@@ -91,7 +101,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
                     {
                         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                         "type": "discord_send_error",
-                        "user_id": chat_id_raw,
+                        "user_id": user_id,
                         "error": repr(discord_err),
                     },
                 )
@@ -454,3 +464,4 @@ def dispatch(evt: Dict[str, Any], ctx: Any) -> None:
 def dispatch_event(evt: dict, ctx: object) -> None:
     "Backward-compatible alias for launcher imports."
     return dispatch(evt, ctx)
+

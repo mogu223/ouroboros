@@ -61,6 +61,15 @@ POLL_TIMEOUT = max(3, _safe_int_env('OUROBOROS_TELEGRAM_POLL_TIMEOUT', _safe_int
 MAIN_LOOP_SLEEP = max(0.05, _safe_float_env('OUROBOROS_MAIN_LOOP_SLEEP_SEC', 0.2))
 SOFT_TIMEOUT_SEC = max(60, _safe_int_env('OUROBOROS_TASK_SOFT_TIMEOUT_SEC', 900))
 HARD_TIMEOUT_SEC = max(SOFT_TIMEOUT_SEC + 60, _safe_int_env('OUROBOROS_TASK_HARD_TIMEOUT_SEC', 2400))
+
+# Evolution task settings
+# Shorter timeout for evolution tasks to prevent hanging (30 seconds wall-time)
+EVOLUTION_WALL_TIME_SEC = max(30, _safe_int_env('OUROBOROS_EVOLUTION_WALL_TIME_SEC', 45))
+# Idle time threshold before triggering evolution (seconds of empty queue)
+IDLE_TIME_BEFORE_EVOLUTION_SEC = max(10, _safe_int_env('OUROBOROS_IDLE_TIME_BEFORE_EVOLUTION_SEC', 30))
+# Enable idle-time evolution (auto-spawn small evolution tasks when idle)
+IDLE_EVOLUTION_ENABLED = _safe_int_env('OUROBOROS_IDLE_EVOLUTION_ENABLED', 1) == 1
+
 BRANCH_DEV = str(os.environ.get('OUROBOROS_BRANCH_DEV', 'ouroboros') or 'ouroboros').strip()
 BRANCH_STABLE = str(os.environ.get('OUROBOROS_BRANCH_STABLE', 'ouroboros-stable') or 'ouroboros-stable').strip()
 
@@ -400,6 +409,8 @@ def main() -> None:
 
     log.info('🚀 VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s', MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
     last_heartbeat = 0.0
+    idle_start_time = None  # Track when queue became idle
+    last_evolution_trigger_time = 0.0  # Track last evolution trigger
 
     while True:
         try:
@@ -449,7 +460,24 @@ def main() -> None:
             sup_queue.enforce_task_timeouts()
             sup_workers.assign_tasks()
 
+            # Idle-time evolution: trigger small evolution tasks when system is idle
             now = time.time()
+            is_queue_empty = (not sup_workers.PENDING) and (not sup_workers.RUNNING)
+
+            if is_queue_empty:
+                if idle_start_time is None:
+                    idle_start_time = now
+                elif IDLE_EVOLUTION_ENABLED:
+                    idle_duration = now - idle_start_time
+                    # Trigger evolution if idle for enough time and not recently triggered
+                    if (idle_duration >= IDLE_TIME_BEFORE_EVOLUTION_SEC and
+                        now - last_evolution_trigger_time >= 300):  # At least 5 min between evolution
+                        sup_queue.enqueue_evolution_task_if_needed(idle_check=True)
+                        last_evolution_trigger_time = now
+                        idle_start_time = None  # Reset idle timer after triggering
+            else:
+                idle_start_time = None  # Reset idle timer when queue has tasks
+
             if now - last_heartbeat >= 30:
                 consciousness.heartbeat()
                 last_heartbeat = now
