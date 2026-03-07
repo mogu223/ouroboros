@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import datetime
 import logging
@@ -9,6 +9,7 @@ import sys
 import time
 import types
 import uuid
+import threading
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
 
@@ -278,6 +279,64 @@ def _make_context(tg: TelegramClient, consciousness: BackgroundConsciousness) ->
     )
 
 
+def _init_discord_bridge() -> bool:
+    """Initialize Discord Bridge if configured."""
+    try:
+        discord_config_paths = [
+            pathlib.Path("/opt/ouroboros/.env.discord"),
+            REPO_DIR / ".env.discord",
+            DRIVE_ROOT / ".env.discord",
+        ]
+        
+        discord_config_path = None
+        for path in discord_config_paths:
+            if path.exists():
+                discord_config_path = path
+                break
+        
+        if not discord_config_path:
+            log.info("Discord config file not found, Discord bridge disabled")
+            return False
+        
+        discord_token = None
+        discord_owner_id = None
+        with open(discord_config_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DISCORD_BOT_TOKEN="):
+                    discord_token = line.split("=", 1)[1].strip()
+                elif line.startswith("DISCORD_OWNER_ID="):
+                    discord_owner_id = line.split("=", 1)[1].strip()
+        
+        if not discord_token:
+            log.info("Discord token not found in config, Discord bridge disabled")
+            return False
+        
+        log.info("Discord configuration found, initializing bridge...")
+        
+        os.environ["DISCORD_BOT_TOKEN"] = discord_token
+        if discord_owner_id:
+            os.environ["DISCORD_OWNER_ID"] = discord_owner_id
+        
+        from ouroboros.channels.discord_bridge import DiscordBridge
+        
+        def start_discord_bot():
+            try:
+                bridge = DiscordBridge()
+                bridge.run()
+            except Exception as e:
+                log.error(f"Discord bot error: {e}", exc_info=True)
+        
+        discord_thread = threading.Thread(target=start_discord_bot, daemon=True, name="DiscordBridge")
+        discord_thread.start()
+        log.info("✅ Discord bridge started in background thread")
+        return True
+        
+    except Exception as e:
+        log.warning(f"Failed to initialize Discord bridge: {e}")
+        return False
+
+
 def main() -> None:
     _init_paths()
     _init_state_module()
@@ -322,6 +381,9 @@ def main() -> None:
     ctx = _make_context(tg, consciousness)
     restored = sup_queue.restore_pending_from_snapshot()
 
+    # Initialize Discord Bridge
+    discord_enabled = _init_discord_bridge()
+
     st = load_state()
     offset = int(st.get('tg_offset') or 0)
 
@@ -336,10 +398,11 @@ def main() -> None:
             'max_workers': MAX_WORKERS,
             'poll_timeout': POLL_TIMEOUT,
             'restored_pending': restored,
+            'discord_enabled': discord_enabled,
         },
     )
 
-    log.info('🚀 VPS launcher started: workers=%d, poll_timeout=%ds', MAX_WORKERS, POLL_TIMEOUT)
+    log.info('🚀 VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s', MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
     last_heartbeat = 0.0
 
     while True:
@@ -431,16 +494,8 @@ def main() -> None:
                 },
             )
             log.error('Main loop error: %s', e, exc_info=True)
-            time.sleep(1.0)
+            time.sleep(MAIN_LOOP_SLEEP)
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        log.info('Received KeyboardInterrupt, shutting down workers...')
-        try:
-            sup_workers.kill_workers()
-        except Exception:
-            pass
-        raise
+    main()
