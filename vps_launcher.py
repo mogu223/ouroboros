@@ -253,6 +253,38 @@ def _build_task_from_update(update: Dict[str, Any], tg: TelegramClient) -> Optio
     return task
 
 
+def _preempt_background_task_for_owner_message() -> None:
+    if not sup_workers.WORKERS:
+        return
+    if len(sup_workers.RUNNING) < len(sup_workers.WORKERS):
+        return
+
+    for running_task_id, meta in list(sup_workers.RUNNING.items()):
+        running_task = meta.get('task') if isinstance(meta, dict) else {}
+        task_type = str((running_task or {}).get('type') or '').strip().lower()
+        task_text = str((running_task or {}).get('text') or '').strip().upper()
+
+        is_background_like = (
+            task_type in ('evolution', 'review')
+            or task_text.startswith('EVOLUTION #')
+            or task_text.startswith('REVIEW:')
+        )
+        if not is_background_like:
+            continue
+
+        if sup_queue.cancel_task_by_id(str(running_task_id)):
+            append_jsonl(
+                DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
+                {
+                    'ts': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'type': 'owner_message_preempt_background',
+                    'task_id': str(running_task_id),
+                    'task_type': task_type,
+                },
+            )
+            return
+
+
 def _make_context(tg: TelegramClient, consciousness: BackgroundConsciousness) -> Any:
     return types.SimpleNamespace(
         DRIVE_ROOT=DRIVE_ROOT,
@@ -378,7 +410,10 @@ def main() -> None:
                 if _handle_fast_command(chat_id, str(task.get('text') or '')):
                     continue
 
-                sup_queue.enqueue_task(task)
+                task['priority'] = -10
+                _preempt_background_task_for_owner_message()
+                sup_queue.enqueue_task(task, front=True)
+                sup_queue.persist_queue_snapshot(reason='owner_message_enqueued_front')
 
             st = load_state()
             st['tg_offset'] = int(offset)

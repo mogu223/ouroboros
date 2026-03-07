@@ -45,6 +45,8 @@ def run_llm_tool_loop(
     active_model,
     active_effort,
     *,
+    max_iterations=200,
+    max_wall_time_sec=0,
     max_retries=8,
     budget_remaining_usd=None,
     event_queue=None,
@@ -65,6 +67,8 @@ def run_llm_tool_loop(
             active_model=str(active_model or ''),
             active_effort=str(active_effort or 'medium'),
             budget_remaining_usd=budget_remaining_usd,
+            max_iterations=max(1, int(max_iterations)),
+            max_wall_time_sec=max(0.0, float(max_wall_time_sec or 0)),
             max_retries=int(max_retries),
             task_type=str(task_type or 'task'),
             event_queue=event_queue,
@@ -425,6 +429,20 @@ class OuroborosAgent:
 
         try:
             ctx, messages, cap_info = self._prepare_task_context(task)
+
+            is_direct_chat = bool(task.get("_is_direct_chat"))
+            max_retries_cfg = int(self.memory.get_config("llm_max_retries", default=8) or 8)
+            max_iterations_cfg = int(self.memory.get_config("task_max_iterations", default=200) or 200)
+            max_wall_time_cfg = float(self.memory.get_config("task_max_wall_time_sec", default=0) or 0)
+
+            if is_direct_chat:
+                max_retries_cfg = int(self.memory.get_config("direct_llm_max_retries", default=min(max_retries_cfg, 4)) or 4)
+                max_iterations_cfg = int(self.memory.get_config("direct_max_iterations", default=12) or 12)
+                max_wall_time_cfg = float(self.memory.get_config("direct_max_wall_time_sec", default=75) or 75)
+
+            max_retries_cfg = max(1, max_retries_cfg)
+            max_iterations_cfg = max(1, max_iterations_cfg)
+            max_wall_time_cfg = max(0.0, max_wall_time_cfg)
             
             # --- Main LLM tool loop (delegated to loop.py) ---
             final_response_content, accumulated_usage, llm_trace = run_llm_tool_loop( # <--- 修改点2: 调用run_llm_tool_loop
@@ -435,7 +453,9 @@ class OuroborosAgent:
                 messages,
                 state.get("active_model"),
                 state.get("active_effort"),
-                max_retries=self.memory.get_config("llm_max_retries", default=8),
+                max_iterations=max_iterations_cfg,
+                max_wall_time_sec=max_wall_time_cfg,
+                max_retries=max_retries_cfg,
                 budget_remaining_usd=state.get("remaining_usd"),
                 event_queue=self._event_queue,
                 task_type=task.get("type", "task"),

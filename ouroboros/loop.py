@@ -614,6 +614,7 @@ async def run_tool_loop(
     active_effort: str,
     budget_remaining_usd: Optional[float] = None,
     max_iterations: int = 200,
+    max_wall_time_sec: float = 0.0,
     max_retries: int = 3, # Max retries for LLM calls within _call_llm_with_resilience
     task_type: str = "task",
     event_queue: Optional[queue.Queue] = None,
@@ -642,10 +643,22 @@ async def run_tool_loop(
     # Initialize circuit breaker and fallback models
     circuit_breaker = get_circuit_breaker()
     fallback_models = get_fallback_models()
+    loop_started_ts = time.time()
 
     try:
         for round_idx in range(max_iterations):
             llm_trace["round"] = round_idx + 1
+
+            if max_wall_time_sec and (time.time() - loop_started_ts) >= float(max_wall_time_sec):
+                timeout_msg = (
+                    f"?? ?????? {int(max_wall_time_sec)} ????????"
+                    "??????????????"
+                )
+                llm_trace["error"] = timeout_msg
+                llm_trace["assistant_notes"].append("task_wall_time_exceeded")
+                log.warning("Task %s exceeded wall-time limit: %ss", task_id, max_wall_time_sec)
+                emit_progress(timeout_msg)
+                return timeout_msg, accumulated_usage, llm_trace
 
             # Check iteration guardian (e.g., max depth)
             if iteration_guardian.should_abort():
@@ -727,7 +740,7 @@ async def run_tool_loop(
                     tools=tools,
                     drive_logs=drive_logs,
                     task_id=task_id,
-                    stateful_executor=tools.browser.stateful_executor, # Pass the browser's stateful executor
+                    stateful_executor=getattr(getattr(tools, "browser", None), "stateful_executor", None),
                     messages=messages,
                     llm_trace=llm_trace,
                     emit_progress=emit_progress,
@@ -745,6 +758,12 @@ async def run_tool_loop(
             )
             emit_progress(f"✅ LLM 回复：{final_response[:200]}...")
             return final_response, accumulated_usage, llm_trace
+
+        loop_limit_msg = f"?? ???????? ({max_iterations})????????????????????"
+        llm_trace["error"] = loop_limit_msg
+        llm_trace["assistant_notes"].append("max_iterations_reached")
+        emit_progress(loop_limit_msg)
+        return loop_limit_msg, accumulated_usage, llm_trace
 
     finally:
         iteration_guardian.exit_iteration() # Ensure iteration guardian state is cleaned up
