@@ -86,6 +86,8 @@ CORE_TOOL_NAMES = {
     "git_status", "git_diff",
     # Execution
     "run_shell",
+    # Code editing
+    "codex_code_edit",
     # Task management
     "schedule_task", "wait_for_task", "get_task_result",
     # Memory & identity

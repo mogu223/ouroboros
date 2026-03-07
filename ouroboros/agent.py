@@ -16,6 +16,7 @@ import queue
 import threading
 import time
 import traceback
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -504,91 +505,181 @@ class OuroborosAgent:
                 context_str += f"--- 文件: {f} (未找到) ---\n"
         return context_str
 
-    def _claude_code_edit_handler(self, ctx: ToolContext, prompt: str, cwd: str = ".") -> str:
-        """
-        Claude Code CLI calls are handled via `apply_patch` (shim in /usr/local/bin).
-        This tool implements the logic to invoke the Claude Code CLI locally.
-        It uses the current LLM to generate the Claude Code CLI command.
-        """
-        _ = ctx # ctx is not used for now, might be in the future
 
-        from ouroboros.tools.claude_cli_prompts import GENERATE_CODE_CLI_CMD_PROMPT
-        
-        # 1. Use the current LLM to generate the Claude Code CLI command
+    def _extract_patch_payload(self, raw_text: str) -> Optional[str]:
+        """Extract an apply_patch payload from LLM output."""
+        text = str(raw_text or "").strip()
+        if not text:
+            return None
+
+        def _extract_patch(s: str) -> Optional[str]:
+            begin = s.find("*** Begin Patch")
+            end = s.rfind("*** End Patch")
+            if begin >= 0 and end >= begin:
+                end += len("*** End Patch")
+                patch = s[begin:end].strip()
+                if patch:
+                    return patch + "\n"
+            return None
+
+        # Direct patch text
+        patch = _extract_patch(text)
+        if patch:
+            return patch
+
+        # Markdown fenced code block
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if len(lines) >= 3 and lines[-1].strip().startswith("```"):
+                inner = "\n".join(lines[1:-1]).strip()
+                patch = _extract_patch(inner)
+                if patch:
+                    return patch
+
+        # Strict JSON output: {"patch": "*** Begin Patch ..."}
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            left = text.find("{")
+            right = text.rfind("}")
+            if left >= 0 and right > left:
+                try:
+                    parsed = json.loads(text[left:right + 1])
+                except Exception:
+                    parsed = None
+
+        if isinstance(parsed, dict):
+            for key in ("patch", "apply_patch"):
+                candidate = str(parsed.get(key) or "").strip()
+                patch = _extract_patch(candidate)
+                if patch:
+                    return patch
+
+        return None
+
+
+
+    def _codex_code_edit_handler(
+        self,
+        ctx: ToolContext,
+        prompt: str,
+        cwd: str = '.',
+        model: str = '',
+        effort: str = 'high',
+    ) -> str:
+        """
+        Generate and apply a code patch using Codex-style workflow via OpenAI-compatible API.
+        """
+        _ = ctx
+
+        from ouroboros.tools.codex_cli_prompts import GENERATE_CODEX_PATCH_PROMPT
+
+        state = json.loads(read_text(self.env.drive_path('state') / 'state.json'))
+
+        chosen_model = (
+            str(model or '').strip()
+            or os.environ.get('OUROBOROS_CODEX_MODEL', '').strip()
+            or os.environ.get('OUROBOROS_MODEL_CODE', '').strip()
+            or str(state.get('active_model') or '').strip()
+            or self.llm.default_model()
+        )
+        chosen_effort = (
+            str(effort or '').strip()
+            or os.environ.get('OUROBOROS_CODEX_REASONING_EFFORT', '').strip()
+            or str(state.get('active_effort') or '').strip()
+            or 'high'
+        )
+
         messages = [
-            {"role": "system", "content": GENERATE_CODE_CLI_CMD_PROMPT},
-            {"role": "user", "content": prompt},
+            {'role': 'system', 'content': GENERATE_CODEX_PATCH_PROMPT},
+            {'role': 'user', 'content': str(prompt or '')},
         ]
 
-        # Use current active model/effort (set by owner, or default from state.json)
-        state = json.loads(read_text(self.env.drive_path("state") / "state.json"))
-        active_model = state.get("active_model")
-        active_effort = state.get("active_effort")
-
-        # This is where the core LLM loop is called to generate the command
-        # This will need to be fixed as well, similar to process_task
-        cli_command_output, usage, llm_trace = run_llm_tool_loop( # <--- 修改点4: 调用run_llm_tool_loop
-            self.llm,
-            self.tools,
-            self.env.drive_path("logs"),
-            "claude_code_cli_gen", # task_id for this sub-task
-            messages,
-            active_model,
-            active_effort,
-            max_retries=self.memory.get_config("llm_max_retries", default=8),
-            budget_remaining_usd=state.get("remaining_usd"),
-            event_queue=self._event_queue,
-            task_type="subtask",
-            # tool_schemas=self.tools.get_all_tool_schemas(), # <--- 修改点5: 删除这一行
-            # No incoming_messages_queue for sub-tasks like this
-            send_progress_message=lambda x: None, # No progress for this internal step
-        )
-        
-        if not cli_command_output:
-            return "⚠️ Failed to generate Claude Code CLI command."
-
-        # Parse the output to extract the command (expecting a JSON object)
         try:
-            parsed_output = json.loads(cli_command_output)
-            command_args = parsed_output.get("command_args")
-            if not isinstance(command_args, list) or not all(isinstance(arg, str) for arg in command_args):
-                raise ValueError("Expected 'command_args' to be a list of strings.")
-            
-            # The tool output might contain assistant notes or other things, 
-            # we only care about the command.
-            if not command_args:
-                return f"⚠️ Generated Claude Code CLI command was empty or invalid: {cli_command_output}"
-            
-        except json.JSONDecodeError:
-            return f"⚠️ Failed to parse Claude Code CLI command output as JSON: {cli_command_output}"
-        except ValueError as e:
-            return f"⚠️ Invalid Claude Code CLI command format: {e}. Output: {cli_command_output}"
-
-        # 2. Execute the generated Claude Code CLI command via shell
-        full_command = ["apply_patch"] + command_args # apply_patch is a shim
-
-        try:
-            # Use run_shell to execute the command. This command is designed to output
-            # the diff / changes made directly to stdout, which will be captured as result.
-            run_shell_result = self.tools.execute("run_shell", {"cmd": full_command, "cwd": cwd})
-            
-            # Check for error in run_shell_result (conventionally starts with ⚠️)
-            if run_shell_result.strip().startswith("⚠️"):
-                return run_shell_result # Propagate the error
-
-            # The Claude Code CLI (via apply_patch shim) directly modifies files.
-            # We assume success if no error was returned by run_shell.
-            return f"Claude Code CLI executed successfully. Changes applied to files:\n{run_shell_result}"
-
+            response_msg, usage = self.llm.chat(
+                messages=messages,
+                model=chosen_model,
+                tools=None,
+                reasoning_effort=chosen_effort,
+                max_tokens=12000,
+            )
         except Exception as e:
-            return f"⚠️ Error executing Claude Code CLI via apply_patch: {type(e).__name__}: {e}"
+            return f'⚠️ Codex API 调用失败: {type(e).__name__}: {e}'
 
+        response_text = str((response_msg or {}).get('content') or '')
+        patch_payload = self._extract_patch_payload(response_text)
+        if not patch_payload:
+            preview = response_text[:500] if response_text else '(empty)'
+            return (
+                '⚠️ Codex 未返回可应用的补丁。'
+                "请让它返回 JSON {'patch': '*** Begin Patch...*** End Patch'}。"
+                f'\nmodel={chosen_model}\npreview={preview}'
+            )
+
+        work_dir = self.env.repo_dir
+        if cwd and str(cwd).strip() not in ('', '.', './'):
+            candidate = (self.env.repo_dir / str(cwd)).resolve()
+            if candidate.exists() and candidate.is_dir():
+                work_dir = candidate
+
+        try:
+            res = subprocess.run(
+                ['apply_patch'],
+                input=patch_payload,
+                text=True,
+                capture_output=True,
+                cwd=str(work_dir),
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired:
+            return '⚠️ Codex 补丁应用超时（180s）。'
+        except Exception as e:
+            return f'⚠️ Codex 补丁应用失败: {type(e).__name__}: {e}'
+
+        out = (res.stdout or '')
+        if res.stderr:
+            out += '\n--- STDERR ---\n' + res.stderr
+
+        # Emit usage event for budget/accounting pipeline
+        if usage:
+            usage_event = {
+                'ts': utc_now_iso(),
+                'type': 'llm_usage',
+                'task_id': 'codex_code_edit',
+                'category': 'codex_code_edit',
+                'model': chosen_model,
+                'usage': {
+                    'prompt_tokens': usage.get('prompt_tokens', 0),
+                    'completion_tokens': usage.get('completion_tokens', 0),
+                    'cost': usage.get('cost', 0),
+                },
+            }
+            if self._event_queue is not None:
+                try:
+                    self._event_queue.put_nowait(usage_event)
+                except Exception:
+                    self._pending_events.append(usage_event)
+            else:
+                self._pending_events.append(usage_event)
+
+        if res.returncode != 0:
+            return (
+                f'⚠️ Codex 补丁应用失败 (exit_code={res.returncode})。'
+                f'\nmodel={chosen_model}\n{out[:4000]}'
+            )
+
+        cost = float((usage or {}).get('cost') or 0.0)
+        return (
+            f'Codex 补丁已应用。model={chosen_model}, effort={chosen_effort}, cost=${cost:.6f}'
+            + (f'\n{out[:3000]}' if out.strip() else '')
+        )
 
     def _init_tools(self) -> None:
         """Inject handlers for specific tools that need agent's internal state."""
-        # For claude_code_edit, we need to inject a handler that uses the agent's LLM loop
-        # to generate the Claude CLI command.
-        self.tools.override_handler("claude_code_edit", self._claude_code_edit_handler)
+        self.tools.override_handler("codex_code_edit", self._codex_code_edit_handler)
+        # Backward-compatible alias: old prompts may still call claude_code_edit
+        self.tools.override_handler("claude_code_edit", self._codex_code_edit_handler)
 
     def run(self, task: Dict[str, Any]) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
         """Entry point for worker tasks."""
