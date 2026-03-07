@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from supervisor.state import load_state, append_jsonl
+from supervisor.state import load_state, save_state, append_jsonl
 from supervisor import git_ops
 from supervisor.telegram import send_with_budget
 from ouroboros.resources import check_memory_for_task, is_heavy_task
@@ -399,6 +399,24 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0
             "worker_pid": boot_evt.get("pid"),
         },
     )
+    if not ok and observed_sha:
+        try:
+            st["current_sha"] = observed_sha
+            save_state(st)
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "worker_sha_expected_updated",
+                    "previous_expected_sha": expected_sha,
+                    "new_expected_sha": observed_sha,
+                },
+            )
+            expected_sha = observed_sha
+            ok = True
+        except Exception:
+            log.warning("Failed to update current_sha after worker boot", exc_info=True)
+
     if not ok and st.get("owner_chat_id"):
         send_with_budget(
             int(st["owner_chat_id"]),
