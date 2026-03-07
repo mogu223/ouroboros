@@ -120,6 +120,10 @@ class BackgroundConsciousness:
         except queue.Full:
             pass
 
+    def heartbeat(self) -> None:
+        "Compatibility no-op for launcher main loop polling."
+        return None
+
     # -------------------------------------------------------------------
     # Main loop
     # -------------------------------------------------------------------
