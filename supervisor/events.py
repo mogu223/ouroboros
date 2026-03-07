@@ -376,25 +376,20 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     """Toggle evolution mode from LLM tool call."""
     enabled = bool(evt.get("enabled", False))
     st = ctx.load_state()
+    st["evolution_mode_enabled"] = enabled
     
+    # Reset failure counter when enabling evolution mode
     if enabled:
-        # When enabling, reset failure counter and set mode to enabled
-        st["evolution_mode_enabled"] = True
         st["evolution_consecutive_failures"] = 0
-        ctx.save_state(st)
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                "🧬 **进化模式已开启**\n\n当前状态：\n- 进化模式：✅ ON\n- 失败计数已重置为 0\n- 阈值：100 次",
-            )
-    else:
-        st["evolution_mode_enabled"] = False
-        ctx.save_state(st)
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                "🧬 **进化模式已关闭**",
-            )
+    
+    ctx.save_state(st)
+    
+    if st.get("owner_chat_id"):
+        status = "ON" if enabled else "OFF"
+        ctx.send_with_budget(
+            int(st["owner_chat_id"]),
+            f"🧬 Evolution: {status} (via agent tool)",
+        )
 
 
 def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
@@ -403,128 +398,23 @@ def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     
     if action == "start":
-        # Start background consciousness
-        st["consciousness_enabled"] = True
-        st["consciousness_last_run"] = time.time()
+        st["background_consciousness_enabled"] = True
         ctx.save_state(st)
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                "🧠 **Background consciousness started**",
-            )
+        msg = "🧠 Background consciousness: STARTED"
     elif action == "stop":
-        st["consciousness_enabled"] = False
+        st["background_consciousness_enabled"] = False
         ctx.save_state(st)
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                "🧠 **Background consciousness stopped**",
-            )
+        msg = "🧠 Background consciousness: STOPPED"
     else:
-        # Status check
-        is_enabled = st.get("consciousness_enabled", False)
-        last_run = st.get("consciousness_last_run", 0)
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                f"🧠 **Consciousness status**: {'ON' if is_enabled else 'OFF'} (last run: {last_run})",
-            )
-
-
-def _handle_evolution_task_failure(evt: Dict[str, Any], ctx: Any) -> None:
-    """Handle evolution task failure tracking and circuit breaker logic."""
-    st = ctx.load_state()
-    failures = int(st.get("evolution_consecutive_failures") or 0) + 1
-    st["evolution_consecutive_failures"] = failures
-    ctx.save_state(st)
-    
-    # Log the failure
-    ctx.append_jsonl(
-        ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-        {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "type": "evolution_task_failure",
-            "consecutive_failures": failures,
-            "threshold": EVOLUTION_FAILURE_THRESHOLD,
-        },
-    )
-    
-    # Check circuit breaker - use dynamic threshold from code constant
-    if failures >= EVOLUTION_FAILURE_THRESHOLD:
-        st["evolution_mode_enabled"] = False
-        ctx.save_state(st)
-        # Clear pending evolution tasks
-        ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
-        ctx.sort_pending()
-        ctx.persist_queue_snapshot(reason="evolution_circuit_breaker")
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                f"🧬⚠️ Evolution paused: {failures} consecutive failures. Use /evolve start to resume after investigating the issue.",
-            )
-
-
-def _handle_switch_model(evt: Dict[str, Any], ctx: Any) -> None:
-    """Handle model switch request from LLM tool call."""
-    model = str(evt.get("model") or "").strip()
-    effort = str(evt.get("effort") or "").strip()
-    st = ctx.load_state()
-    
-    if model:
-        st["current_model"] = model
-    if effort:
-        st["current_effort"] = effort
-    ctx.save_state(st)
+        is_enabled = st.get("background_consciousness_enabled", False)
+        msg = f"🧠 Background consciousness: {'RUNNING' if is_enabled else 'STOPPED'}"
     
     if st.get("owner_chat_id"):
-        msg = f"🔄 **Model switched**"
-        if model:
-            msg += f"\n- Model: `{model}`"
-        if effort:
-            msg += f"\n- Effort: `{effort}`"
         ctx.send_with_budget(int(st["owner_chat_id"]), msg)
 
 
-def _handle_update_identity(evt: Dict[str, Any], ctx: Any) -> None:
-    """Handle identity update from LLM tool call."""
-    content = str(evt.get("content") or "").strip()
-    if not content:
-        return
-    
-    try:
-        from ouroboros.memory import update_identity
-        update_identity(content)
-        st = ctx.load_state()
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                "📝 **Identity updated**",
-            )
-    except Exception as e:
-        log.warning("Failed to update identity: %s", e)
-
-
-def _handle_update_scratchpad(evt: Dict[str, Any], ctx: Any) -> None:
-    """Handle scratchpad update from LLM tool call."""
-    content = str(evt.get("content") or "").strip()
-    if not content:
-        return
-    
-    try:
-        from ouroboros.memory import update_scratchpad
-        update_scratchpad(content)
-        st = ctx.load_state()
-        if st.get("owner_chat_id"):
-            ctx.send_with_budget(
-                int(st["owner_chat_id"]),
-                "📝 **Scratchpad updated**",
-            )
-    except Exception as e:
-        log.warning("Failed to update scratchpad: %s", e)
-
-
-def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
-    """Dispatch an event to the appropriate handler."""
+def dispatch(evt: Dict[str, Any], ctx: Any) -> None:
+    """Dispatch event to appropriate handler."""
     etype = str(evt.get("type") or "").lower()
     
     handlers = {
@@ -541,10 +431,6 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
         "cancel_task": _handle_cancel_task,
         "toggle_evolution": _handle_toggle_evolution,
         "toggle_consciousness": _handle_toggle_consciousness,
-        "evolution_task_failure": _handle_evolution_task_failure,
-        "switch_model": _handle_switch_model,
-        "update_identity": _handle_update_identity,
-        "update_scratchpad": _handle_update_scratchpad,
     }
     
     handler = handlers.get(etype)
@@ -552,6 +438,15 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
         try:
             handler(evt, ctx)
         except Exception as e:
-            log.warning("Event handler failed for %s: %s", etype, e)
+            log.error(f"Event handler error for {etype}: {e}", exc_info=True)
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "event_handler_error",
+                    "event_type": etype,
+                    "error": repr(e),
+                },
+            )
     else:
-        log.debug("No handler for event type: %s", etype)
+        log.debug(f"Unknown event type: {etype}")
