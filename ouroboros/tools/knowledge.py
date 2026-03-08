@@ -75,7 +75,7 @@ def _ensure_dir(ctx: ToolContext):
     ctx.drive_path(KNOWLEDGE_DIR).mkdir(parents=True, exist_ok=True)
 
 
-def _extract_summary(text: str, max_chars: int = 120) -> str:
+def _extract_summary(text: str, max_chars: int = 100) -> str:
     """Extract a concise summary from knowledge file content.
 
     Extracts key metadata (version, date, status) or first meaningful content line.
@@ -132,7 +132,7 @@ def _rebuild_index(ctx: ToolContext):
             # Skip files with invalid names
             continue
 
-        # Read and extract summary
+        # Read first 3 non-heading lines as summary
         try:
             text = f.read_text(encoding="utf-8").strip()
             summary = _extract_summary(text)
