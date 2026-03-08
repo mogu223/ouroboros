@@ -1,4 +1,4 @@
-"""
+﻿"""
 Browser automation tools via Playwright (sync API).
 
 Provides browse_page (open URL, get content/screenshot)
@@ -28,10 +28,8 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 log = logging.getLogger(__name__)
 
 _playwright_ready = False
-# Module-level Playwright instance to avoid greenlet threading issues
-# Persists across ToolContext recreations but can be reset on error
 _pw_instance = None
-_pw_thread_id = None  # Track which thread owns the Playwright instance
+_pw_thread_id = None
 
 
 def _ensure_playwright_installed():
@@ -59,38 +57,59 @@ def _ensure_playwright_installed():
     _playwright_ready = True
 
 
+def _kill_lingering_browser_processes() -> None:
+    """Best-effort cleanup for Chromium and Playwright driver processes."""
+    patterns = [
+        "playwright/driver/package/cli.js run-driver",
+        "playwright/driver/node",
+        "chromium",
+        "chrome-linux/chrome",
+    ]
+    for pattern in patterns:
+        try:
+            subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True, timeout=5)
+        except Exception:
+            log.debug("Failed to kill browser pattern %s during reset", pattern, exc_info=True)
+
+
+def _stop_playwright_instance() -> None:
+    """Stop the module-level Playwright runtime if one exists."""
+    global _pw_instance
+    if _pw_instance is None:
+        return
+    try:
+        _pw_instance.stop()
+    except Exception:
+        log.debug("Failed to stop Playwright instance during reset", exc_info=True)
+
+
 def _reset_playwright_greenlet():
     """
     Fully reset Playwright's greenlet state by purging all related modules.
     This is necessary because sync_playwright() uses greenlets internally,
-    and once a greenlet dies, it cannot be reused across "threads".
+    and once a greenlet dies, it cannot be reused across threads.
     """
     global _pw_instance, _pw_thread_id
 
     log.info("Resetting Playwright greenlet state...")
 
-    # Kill any lingering chromium processes
-    try:
-        subprocess.run(["pkill", "-9", "-f", "chromium"], capture_output=True, timeout=5)
-    except Exception:
-        log.debug("Failed to kill chromium processes during reset", exc_info=True)
-        pass
+    _stop_playwright_instance()
+    _kill_lingering_browser_processes()
 
-    # Purge all playwright modules from sys.modules to reset greenlet state
-    mods_to_remove = [k for k in sys.modules.keys() if k.startswith('playwright')]
-    for k in mods_to_remove:
-        del sys.modules[k]
-
-    # Also purge greenlet-related modules to ensure clean state
-    mods_to_remove = [k for k in sys.modules.keys() if 'greenlet' in k.lower()]
+    mods_to_remove = [k for k in sys.modules.keys() if k.startswith("playwright")]
     for k in mods_to_remove:
         try:
             del sys.modules[k]
         except Exception:
-            log.debug(f"Failed to delete greenlet module {k} during reset", exc_info=True)
-            pass
+            log.debug("Failed to delete playwright module %s during reset", k, exc_info=True)
 
-    # Reset module-level instance and thread ID
+    mods_to_remove = [k for k in sys.modules.keys() if "greenlet" in k.lower()]
+    for k in mods_to_remove:
+        try:
+            del sys.modules[k]
+        except Exception:
+            log.debug("Failed to delete greenlet module %s during reset", k, exc_info=True)
+
     _pw_instance = None
     _pw_thread_id = None
     log.info("Playwright greenlet state reset complete")
@@ -101,10 +120,13 @@ def _ensure_browser(ctx: ToolContext):
     but Playwright instance is module-level to avoid greenlet issues."""
     global _pw_instance, _pw_thread_id
 
-    # Check if we've switched threads - if so, reset everything
     current_thread_id = threading.get_ident()
     if _pw_instance is not None and _pw_thread_id != current_thread_id:
-        log.info(f"Thread switch detected (old={_pw_thread_id}, new={current_thread_id}). Resetting Playwright...")
+        log.info(
+            "Thread switch detected (old=%s, new=%s). Resetting Playwright...",
+            _pw_thread_id,
+            current_thread_id,
+        )
         _reset_playwright_greenlet()
 
     if ctx.browser_state.browser is not None:
@@ -113,33 +135,27 @@ def _ensure_browser(ctx: ToolContext):
                 return ctx.browser_state.page
         except Exception:
             log.debug("Browser connection check failed in _ensure_browser", exc_info=True)
-            pass
-        # Browser died — clean up and recreate
         cleanup_browser(ctx)
 
     _ensure_playwright_installed()
 
-    # Use module-level Playwright instance to avoid greenlet threading issues
     if _pw_instance is None:
         from playwright.sync_api import sync_playwright
 
         try:
             _pw_instance = sync_playwright().start()
-            _pw_thread_id = current_thread_id  # Record which thread owns this instance
-            log.info(f"Created Playwright instance in thread {_pw_thread_id}")
+            _pw_thread_id = current_thread_id
+            log.info("Created Playwright instance in thread %s", _pw_thread_id)
         except RuntimeError as e:
             if "cannot switch" in str(e) or "different thread" in str(e):
-                # Greenlet is dead, do a full reset
                 _reset_playwright_greenlet()
-                # Now import fresh and try again
                 from playwright.sync_api import sync_playwright
                 _pw_instance = sync_playwright().start()
                 _pw_thread_id = current_thread_id
-                log.info(f"Recreated Playwright instance in thread {_pw_thread_id} after error")
+                log.info("Recreated Playwright instance in thread %s after error", _pw_thread_id)
             else:
                 raise
 
-    # Store reference in ctx for cleanup
     ctx.browser_state.pw_instance = _pw_instance
 
     ctx.browser_state.browser = _pw_instance.chromium.launch(
@@ -169,29 +185,22 @@ def _ensure_browser(ctx: ToolContext):
 
 
 def cleanup_browser(ctx: ToolContext) -> None:
-    """Close browser and playwright. Called by agent.py in finally block.
-
-    Note: We DON'T stop the module-level _pw_instance here to allow reuse
-    across tasks. Only close the browser and page for this context.
-    """
-    global _pw_instance
-
+    """Close browser resources for the current task context."""
     try:
         if ctx.browser_state.page is not None:
             ctx.browser_state.page.close()
     except Exception:
         log.debug("Failed to close browser page during cleanup", exc_info=True)
-        pass
     try:
         if ctx.browser_state.browser is not None:
             ctx.browser_state.browser.close()
     except Exception as e:
-        # If browser cleanup fails with thread error, reset everything
         if "cannot switch" in str(e) or "different thread" in str(e):
             log.warning("Browser cleanup hit thread error, resetting Playwright...")
             _reset_playwright_greenlet()
+        else:
+            log.debug("Failed to close browser during cleanup", exc_info=True)
 
-    # Clear ctx references but keep module-level _pw_instance alive for reuse
     ctx.browser_state.page = None
     ctx.browser_state.browser = None
     ctx.browser_state.pw_instance = None
@@ -208,9 +217,9 @@ _MARKDOWN_JS = """() => {
                 const tag = child.tagName;
                 if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
                 if (['H1','H2','H3','H4','H5','H6'].includes(tag))
-                    out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
-                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
-                if (tag === 'LI') out += '\\n- ';
+                    out += '\n' + '#'.repeat(parseInt(tag[1])) + ' ';
+                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\n';
+                if (tag === 'LI') out += '\n- ';
                 if (tag === 'A') out += '[';
                 out += walk(child);
                 if (tag === 'A') out += '](' + (child.href||'') + ')';
@@ -238,7 +247,7 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
     elif output == "markdown":
         text = page.evaluate(_MARKDOWN_JS)
         return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
-    else:  # text
+    else:
         text = page.inner_text("body")
         return text[:30000] + ("... [truncated]" if len(text) > 30000 else "")
 
@@ -253,7 +262,7 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         return _extract_page_output(page, output, ctx)
     except Exception as e:
         if "cannot switch" in str(e) or "different thread" in str(e) or "greenlet" in str(e).lower():
-            log.warning(f"Browser thread error detected: {e}. Resetting Playwright and retrying...")
+            log.warning("Browser thread error detected: %s. Resetting Playwright and retrying...", e)
             cleanup_browser(ctx)
             _reset_playwright_greenlet()
             page = _ensure_browser(ctx)
@@ -316,15 +325,12 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
     try:
         return _do_action()
     except (RuntimeError, Exception) as e:
-        # Catch greenlet threading errors and reset Playwright completely
         if "cannot switch" in str(e) or "different thread" in str(e) or "greenlet" in str(e).lower():
-            log.warning(f"Browser thread error detected: {e}. Resetting Playwright and retrying...")
+            log.warning("Browser thread error detected: %s. Resetting Playwright and retrying...", e)
             cleanup_browser(ctx)
             _reset_playwright_greenlet()
-            # Retry once with fresh state
             return _do_action()
-        else:
-            raise
+        raise
 
 
 def get_tools() -> List[ToolEntry]:
