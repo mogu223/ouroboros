@@ -133,20 +133,19 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     if task_type == "evolution":
         st = ctx.load_state()
         # Check if task produced meaningful output (successful evolution)
-        # A successful evolution should have:
-        # - Reasonable cost (not near-zero, indicating actual work)
-        # - Multiple rounds (not just 1 retry)
+        # NOTE: cost_usd can stay at 0.0 when running behind a zero-cost gateway,
+        # so "cost > 0" is not a reliable success indicator by itself.
         cost = float(evt.get("cost_usd") or 0)
         rounds = int(evt.get("total_rounds") or 0)
+        duration_sec = float(evt.get("duration_sec") or 0)
 
-        # Heuristic: if cost > $0.10 and rounds >= 1, consider it successful
-        # Empty responses typically cost < $0.01 and have 0-1 rounds
-        if cost > 0.10 and rounds >= 1:
-            # Success: reset failure counter
+        # Treat as success if it clearly did work, even at zero reported cost.
+        success = (rounds >= 2) or (duration_sec >= 60.0) or (cost > 0.10)
+
+        if success:
             st["evolution_consecutive_failures"] = 0
             ctx.save_state(st)
         else:
-            # Likely failure (empty response or minimal work)
             failures = int(st.get("evolution_consecutive_failures") or 0) + 1
             st["evolution_consecutive_failures"] = failures
             ctx.save_state(st)
@@ -159,6 +158,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     "consecutive_failures": failures,
                     "cost_usd": cost,
                     "rounds": rounds,
+                    "duration_sec": round(duration_sec, 3),
                 },
             )
             
