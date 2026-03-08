@@ -105,11 +105,9 @@ def _codex_code_edit_handler(
     effort: str = "high",
 ) -> str:
     """Handle codex_code_edit tool calls."""
-    # Determine model - use get_default_model() instead of undefined DEFAULT_MODEL
+    # Determine model
     if not model:
-        model = os.environ.get("OUROBOROS_CODEX_MODEL", "") or os.environ.get("OUROBOROS_MODEL_CODE", "")
-        if not model:
-            model = get_default_model()
+        model = os.environ.get("OUROBOROS_CODEX_MODEL", "") or os.environ.get("OUROBOROS_MODEL_CODE", "") or get_default_model()
     
     # Ensure cwd is absolute and within repo
     repo_dir = ctx.repo_dir
