@@ -35,16 +35,40 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     return items
 
 
-def _repo_read(ctx: ToolContext, path: str) -> str:
-    return read_text(ctx.repo_path(path))
+def _repo_read(ctx: ToolContext, path: str, offset: int = 0, limit: int = 0) -> str:
+    """Read a UTF-8 text file from the GitHub repo (relative path).
+    
+    Args:
+        path: Relative path to file in repo
+        offset: Line offset to start reading from (0 = beginning)
+        limit: Max lines to read (0 = unlimited)
+    """
+    content = read_text(ctx.repo_path(path))
+    lines = content.splitlines()
+    
+    if offset > 0:
+        lines = lines[offset:]
+    if limit > 0:
+        lines = lines[:limit]
+    
+    return "\n".join(lines)
 
 
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     return json.dumps(_list_dir(ctx.repo_dir, dir, max_entries), ensure_ascii=False, indent=2)
 
 
-def _drive_read(ctx: ToolContext, path: str) -> str:
-    return read_text(ctx.drive_path(path))
+def _drive_read(ctx: ToolContext, path: str, offset: int = 0, limit: int = 0) -> str:
+    """Read a UTF-8 text file from Google Drive (relative to MyDrive/Ouroboros/)."""
+    content = read_text(ctx.drive_path(path))
+    lines = content.splitlines()
+    
+    if offset > 0:
+        lines = lines[offset:]
+    if limit > 0:
+        lines = lines[:limit]
+    
+    return "\n".join(lines)
 
 
 def _drive_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
@@ -329,7 +353,11 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("repo_read", {
             "name": "repo_read",
             "description": "Read a UTF-8 text file from the GitHub repo (relative path).",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "default": 0, "description": "Line offset to start reading from (0 = beginning)"},
+                "limit": {"type": "integer", "default": 0, "description": "Max lines to read (0 = unlimited)"},
+            }, "required": ["path"]},
         }, _repo_read),
         ToolEntry("repo_list", {
             "name": "repo_list",
@@ -342,7 +370,11 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("drive_read", {
             "name": "drive_read",
             "description": "Read a UTF-8 text file from Google Drive (relative to MyDrive/Ouroboros/).",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "offset": {"type": "integer", "default": 0, "description": "Line offset to start reading from (0 = beginning)"},
+                "limit": {"type": "integer", "default": 0, "description": "Max lines to read (0 = unlimited)"},
+            }, "required": ["path"]},
         }, _drive_read),
         ToolEntry("drive_list", {
             "name": "drive_list",
@@ -382,17 +414,12 @@ def get_tools() -> List[ToolEntry]:
             "name": "summarize_dialogue",
             "description": "Summarize dialogue history into key moments, decisions, and creator preferences. Writes to memory/dialogue_summary.md.",
             "parameters": {"type": "object", "properties": {
-                "last_n": {"type": "integer", "description": "Number of recent messages to summarize (default 200)"},
+                "last_n": {"type": "integer", "default": 200, "description": "Number of recent messages to summarize"},
             }, "required": []},
         }, _summarize_dialogue),
         ToolEntry("forward_to_worker", {
             "name": "forward_to_worker",
-            "description": (
-                "Forward a message to a running worker task's mailbox. "
-                "Use when the owner sends a message during your active conversation "
-                "that is relevant to a specific running background task. "
-                "The worker will see it as [Owner message during task] on its next LLM round."
-            ),
+            "description": "Forward a message to a running worker task's mailbox. Use when the owner sends a message during your active conversation that is relevant to a specific running background task.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string", "description": "ID of the running task to forward to"},
                 "message": {"type": "string", "description": "Message text to forward"},
