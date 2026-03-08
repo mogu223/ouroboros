@@ -75,26 +75,41 @@ def _ensure_dir(ctx: ToolContext):
     ctx.drive_path(KNOWLEDGE_DIR).mkdir(parents=True, exist_ok=True)
 
 
-def _extract_summary(text: str, max_chars: int = 150) -> str:
-    """Extract a richer summary from knowledge file content.
+def _extract_summary(text: str, max_chars: int = 120) -> str:
+    """Extract a concise summary from knowledge file content.
 
-    Skips heading lines (starting with #) and collects up to 3 meaningful
-    content sentences/lines, joined with ' | ', capped at max_chars.
+    Extracts key metadata (version, date, status) or first meaningful content line.
+    Prefers lines with **bold** markers as they usually contain key info.
     """
     lines = text.strip().split("\n")
     snippets = []
+
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        # Strip markdown list/bold markers for a cleaner snippet
-        clean = stripped.lstrip("-*").strip().lstrip("#").strip()
-        if clean:
-            snippets.append(clean)
-        if len(snippets) >= 3:
+
+        # Look for bold markers (**text**) - usually key metadata
+        if "**" in stripped:
+            # Extract content between ** markers
+            parts = stripped.split("**")
+            if len(parts) >= 3:
+                # Join the bold parts with their values
+                clean = stripped.replace("**", "").strip()
+                # Remove list markers
+                clean = clean.lstrip("- ").strip()
+                if clean and clean not in snippets:
+                    snippets.append(clean)
+        else:
+            # Non-bold content line
+            clean = stripped.lstrip("- ").strip()
+            if clean and clean not in snippets:
+                snippets.append(clean)
+
+        if len(snippets) >= 2:
             break
 
-    summary = " | ".join(snippets)
+    summary = " | ".join(snippets) if snippets else "(no summary)"
     if len(summary) > max_chars:
         summary = summary[:max_chars - 1] + "…"
     return summary
@@ -117,7 +132,7 @@ def _rebuild_index(ctx: ToolContext):
             # Skip files with invalid names
             continue
 
-        # Read first 3 non-heading lines as summary
+        # Read and extract summary
         try:
             text = f.read_text(encoding="utf-8").strip()
             summary = _extract_summary(text)
