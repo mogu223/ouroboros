@@ -337,41 +337,107 @@ class OuroborosAgent:
             return {"status": "error", "error": str(e)}, 0
 
     def _verify_system_state(self, git_sha: str) -> None:
-        """Bible Principle 1: verify system state on every startup.
+        """Bible Principle 1: verify system state on startup.
 
-        Checks:
-        - Uncommitted changes (auto-rescue commit & push)
-        - VERSION file sync with git tags
-        - Budget remaining (warning thresholds)
+        Run this verification only once across concurrently booting worker processes.
         """
         checks = {}
         issues = 0
         drive_logs = self.env.drive_path("logs")
+        state_dir = self.env.drive_path("state")
+        state_dir.mkdir(parents=True, exist_ok=True)
+        claim_path = state_dir / "startup_verification.claim.json"
+        done_path = state_dir / "startup_verification.done.json"
+        claim_ttl_sec = 180
+        now_ts = time.time()
 
-        # 1. Uncommitted changes
-        checks["uncommitted_changes"], issue_count = self._check_uncommitted_changes()
-        issues += issue_count
+        try:
+            done_data = json.loads(read_text(done_path))
+            done_git_sha = str(done_data.get("git_sha") or "").strip()
+            done_ts = float(done_data.get("ts_epoch") or 0)
+            if done_git_sha == git_sha and done_ts and (now_ts - done_ts) < claim_ttl_sec:
+                return
+        except Exception:
+            pass
 
-        # 2. VERSION vs git tag
-        checks["version_sync"], issue_count = self._check_version_sync()
-        issues += issue_count
+        try:
+            while True:
+                try:
+                    fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        json.dump(
+                            {
+                                "pid": os.getpid(),
+                                "git_sha": git_sha,
+                                "ts": utc_now_iso(),
+                                "ts_epoch": now_ts,
+                            },
+                            fh,
+                            ensure_ascii=False,
+                        )
+                    break
+                except FileExistsError:
+                    try:
+                        claim_data = json.loads(read_text(claim_path))
+                        claim_ts = float(claim_data.get("ts_epoch") or 0)
+                    except Exception:
+                        claim_ts = 0.0
+                    if claim_ts and (now_ts - claim_ts) < claim_ttl_sec:
+                        return
+                    try:
+                        claim_path.unlink()
+                    except FileNotFoundError:
+                        continue
+                    except Exception:
+                        log.debug("Failed to clear stale startup verification claim", exc_info=True)
+                        return
+        except Exception:
+            log.debug("Failed to claim startup verification", exc_info=True)
+            return
 
-        # 3. Budget check
-        checks["budget"], issue_count = self._check_budget()
-        issues += issue_count
+        try:
+            checks["uncommitted_changes"], issue_count = self._check_uncommitted_changes()
+            issues += issue_count
 
-        # Log verification result
-        event = {
-            "ts": utc_now_iso(),
-            "type": "startup_verification",
-            "checks": checks,
-            "issues_count": issues,
-            "git_sha": git_sha,
-        }
-        append_jsonl(drive_logs / "events.jsonl", event)
+            checks["version_sync"], issue_count = self._check_version_sync()
+            issues += issue_count
 
-        if issues > 0:
-            log.warning(f"Startup verification found {issues} issue(s): {checks}")
+            checks["budget"], issue_count = self._check_budget()
+            issues += issue_count
+
+            event = {
+                "ts": utc_now_iso(),
+                "type": "startup_verification",
+                "checks": checks,
+                "issues_count": issues,
+                "git_sha": git_sha,
+            }
+            append_jsonl(drive_logs / "events.jsonl", event)
+
+            if issues > 0:
+                log.warning(f"Startup verification found {issues} issue(s): {checks}")
+        finally:
+            try:
+                done_path.write_text(
+                    json.dumps(
+                        {
+                            "pid": os.getpid(),
+                            "git_sha": git_sha,
+                            "ts": utc_now_iso(),
+                            "ts_epoch": time.time(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                log.debug("Failed to persist startup verification marker", exc_info=True)
+            try:
+                claim_path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                log.debug("Failed to delete startup verification claim", exc_info=True)
 
     # =====================================================================
     # Main entry point
@@ -570,6 +636,5 @@ def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> Ourob
 
 # Alias for backward compatibility
 OuroborosAgent.handle_task = OuroborosAgent.run_task
-
 
 
