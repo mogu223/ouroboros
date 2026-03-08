@@ -275,6 +275,8 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
 
         if success:
             st["evolution_consecutive_failures"] = 0
+            st["evolution_backoff_until"] = ""
+            st["evolution_backoff_reason"] = ""
             ctx.save_state(st)
             playbook_text = _persist_discord_playbook(ctx, evt, st)
             if playbook_text:
@@ -296,17 +298,21 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                 },
             )
             
-            # Check if we've hit the threshold - use the code constant, not state
+            # Keep evolution enabled; switch to cooldown instead of auto-disabling.
             if failures >= EVOLUTION_FAILURE_THRESHOLD:
-                st["evolution_mode_enabled"] = False
+                try:
+                    failure_backoff_sec = int(str(os.environ.get("OUROBOROS_EVOLUTION_FAILURE_BACKOFF_SEC", "1200") or "1200").strip())
+                except Exception:
+                    failure_backoff_sec = 1200
+                failure_backoff_sec = max(60, failure_backoff_sec)
+                backoff_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=failure_backoff_sec)
+                st["evolution_backoff_until"] = backoff_until.isoformat()
+                st["evolution_backoff_reason"] = f"failure_threshold:{failures}"
                 ctx.save_state(st)
-                ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
-                ctx.sort_pending()
-                ctx.persist_queue_snapshot(reason="evolution_circuit_breaker")
                 if st.get("owner_chat_id"):
                     ctx.send_with_budget(
                         int(st["owner_chat_id"]),
-                        f"???? Evolution paused: {failures} consecutive failures. Use /evolve start to resume after investigating the issue.",
+                        f"Evolution failure-guard: {failures} consecutive failures. Keeping evolution ON and backing off for {max(1, failure_backoff_sec // 60)} min.",
                     )
 
     if task_id:

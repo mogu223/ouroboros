@@ -24,8 +24,8 @@ EVOLUTION_BUDGET_RESERVE: float = 5.0  # Reserve for evolution tasks
 # Queue snapshot path
 QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
 
-# Evolution failure threshold before auto-pause
-EVOLUTION_FAILURE_THRESHOLD: int = 100  # Max consecutive failures before pausing evolution
+# Legacy failure threshold used for evolution backoff notices.
+EVOLUTION_FAILURE_THRESHOLD: int = 100  # Evolution stays enabled; threshold only triggers backoff.
 
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
@@ -56,6 +56,8 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("budget_drift_pct", None)
     st.setdefault("budget_drift_alert", False)
     st.setdefault("evolution_consecutive_failures", 0)
+    st.setdefault("evolution_backoff_until", "")
+    st.setdefault("evolution_backoff_reason", "")
     # Remove legacy keys
     for legacy_key in ("approvals", "idle_cursor", "idle_stats", "last_idle_task_at",
                         "last_auto_review_at", "last_review_task_id", "session_daily_snapshot"):

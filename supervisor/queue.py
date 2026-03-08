@@ -506,6 +506,15 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
     if not owner_chat_id:
         return
 
+    backoff_until_iso = str(st.get("evolution_backoff_until") or "").strip()
+    backoff_until_ts = parse_iso_to_ts(backoff_until_iso)
+    now_ts = time.time()
+    if backoff_until_ts is not None:
+        if now_ts < backoff_until_ts:
+            return
+        st["evolution_backoff_until"] = ""
+        st["evolution_backoff_reason"] = ""
+
     remaining = budget_remaining(st)
     if remaining < EVOLUTION_BUDGET_RESERVE:
         send_with_budget(
@@ -534,15 +543,35 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
         repeat_limit = 6
     repeat_limit = max(2, repeat_limit)
     if repeat_streak >= repeat_limit:
-        st["evolution_mode_enabled"] = False
+        try:
+            repeat_backoff_sec = int(str(os.environ.get("OUROBOROS_EVOLUTION_REPEAT_BACKOFF_SEC", "900") or "900").strip())
+        except Exception:
+            repeat_backoff_sec = 900
+        repeat_backoff_sec = max(60, repeat_backoff_sec)
+        backoff_until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=repeat_backoff_sec)
+        st["evolution_backoff_until"] = backoff_until.isoformat()
+        st["evolution_backoff_reason"] = f"repeat_context:{repeat_streak + 1}"
+        st["evolution_context_repeat_streak"] = 0
+        st["last_evolution_context"] = ""
         save_state(st)
         send_with_budget(
             int(owner_chat_id),
-            f"???? Evolution auto-paused: same issue context repeated {repeat_streak + 1} cycles. Use /evolve start after manual intervention.",
+            f"Evolution repeat-guard: same issue context repeated {repeat_streak + 1} cycles. Keeping evolution ON and backing off for {max(1, repeat_backoff_sec // 60)} min.",
         )
         return
 
-    task_text = build_evolution_task_text(cycle, context if context else "")
+    guarded_context = context
+    if context and repeat_streak >= 1:
+        guarded_context = (
+            f"{context}\n\n"
+            "REPEAT_GUARD:\n"
+            "- The recent evolution context has repeated.\n"
+            "- Do not only restate the same diagnosis.\n"
+            "- Choose a different validation path or concrete mitigation.\n"
+            "- If blocked, make one small verifiable change and report it."
+        )
+
+    task_text = build_evolution_task_text(cycle, guarded_context if guarded_context else "")
 
     tid = uuid.uuid4().hex[:8]
     enqueue_task(
@@ -557,7 +586,8 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
 
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    st["evolution_consecutive_failures"] = 0
+    st["evolution_backoff_until"] = ""
+    st["evolution_backoff_reason"] = ""
     save_state(st)
 
     if context:

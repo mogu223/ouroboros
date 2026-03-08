@@ -1,4 +1,4 @@
-﻿"""Web search tool with Responses API primary path and HTTP fallback."""
+"""Web search tool with Responses API primary path and HTTP fallback."""
 
 from __future__ import annotations
 

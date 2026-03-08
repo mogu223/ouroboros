@@ -1,4 +1,4 @@
-﻿"""
+"""
 Browser automation tools via Playwright (sync API).
 
 Provides browse_page (open URL, get content/screenshot)
@@ -217,9 +217,9 @@ _MARKDOWN_JS = """() => {
                 const tag = child.tagName;
                 if (['SCRIPT','STYLE','NOSCRIPT'].includes(tag)) continue;
                 if (['H1','H2','H3','H4','H5','H6'].includes(tag))
-                    out += '\n' + '#'.repeat(parseInt(tag[1])) + ' ';
-                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\n';
-                if (tag === 'LI') out += '\n- ';
+                    out += '\\n' + '#'.repeat(parseInt(tag[1])) + ' ';
+                if (tag === 'P' || tag === 'DIV' || tag === 'BR') out += '\\n';
+                if (tag === 'LI') out += '\\n- ';
                 if (tag === 'A') out += '[';
                 out += walk(child);
                 if (tag === 'A') out += '](' + (child.href||'') + ')';
