@@ -310,8 +310,9 @@ class DiscordBridge:
             # ??????? @ ???
             is_dm = isinstance(message.channel, discord.DMChannel)
             is_mentioned = bot.user in message.mentions
-            if not is_dm and not is_mentioned:
-                return
+            if not is_dm:
+                if not allowed_users and not is_mentioned:
+                    return
                 
             # ???? (??????????)
             content = message.content
