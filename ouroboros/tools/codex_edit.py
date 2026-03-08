@@ -11,6 +11,7 @@ from typing import Any, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.apply_patch import install as install_apply_patch
+from ouroboros.config import get_default_model
 
 log = logging.getLogger(__name__)
 
@@ -104,11 +105,11 @@ def _codex_code_edit_handler(
     effort: str = "high",
 ) -> str:
     """Handle codex_code_edit tool calls."""
-    from ouroboros.llm import DEFAULT_MODEL
-    
-    # Determine model
+    # Determine model - use get_default_model() instead of undefined DEFAULT_MODEL
     if not model:
-        model = os.environ.get("OUROBOROS_CODEX_MODEL", "") or os.environ.get("OUROBOROS_MODEL_CODE", "") or DEFAULT_MODEL
+        model = os.environ.get("OUROBOROS_CODEX_MODEL", "") or os.environ.get("OUROBOROS_MODEL_CODE", "")
+        if not model:
+            model = get_default_model()
     
     # Ensure cwd is absolute and within repo
     repo_dir = ctx.repo_dir
@@ -189,4 +190,3 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=240,
         ),
     ]
-
