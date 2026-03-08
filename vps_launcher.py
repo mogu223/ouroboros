@@ -63,11 +63,8 @@ SOFT_TIMEOUT_SEC = max(60, _safe_int_env('OUROBOROS_TASK_SOFT_TIMEOUT_SEC', 900)
 HARD_TIMEOUT_SEC = max(SOFT_TIMEOUT_SEC + 60, _safe_int_env('OUROBOROS_TASK_HARD_TIMEOUT_SEC', 2400))
 
 # Evolution task settings
-# Shorter timeout for evolution tasks to prevent hanging (30 seconds wall-time)
 EVOLUTION_WALL_TIME_SEC = max(30, _safe_int_env('OUROBOROS_EVOLUTION_WALL_TIME_SEC', 45))
-# Idle time threshold before triggering evolution (seconds of empty queue)
 IDLE_TIME_BEFORE_EVOLUTION_SEC = max(10, _safe_int_env('OUROBOROS_IDLE_TIME_BEFORE_EVOLUTION_SEC', 30))
-# Enable idle-time evolution (auto-spawn small evolution tasks when idle)
 IDLE_EVOLUTION_ENABLED = _safe_int_env('OUROBOROS_IDLE_EVOLUTION_ENABLED', 1) == 1
 IDLE_EVOLUTION_MIN_INTERVAL_SEC = max(300, _safe_int_env('OUROBOROS_IDLE_EVOLUTION_MIN_INTERVAL_SEC', 1800))
 
@@ -160,7 +157,7 @@ def _ensure_owner(chat_id: int, tg: TelegramClient) -> bool:
         st['owner_id'] = int(chat_id)
         st['last_owner_message_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_state(st)
-        send_with_budget(int(chat_id), '? Owner registered. Ouroboros is online.')
+        send_with_budget(int(chat_id), '🟢 Owner registered. Ouroboros is online.')
         return True
 
     try:
@@ -169,7 +166,7 @@ def _ensure_owner(chat_id: int, tg: TelegramClient) -> bool:
         owner_chat_int = int(chat_id)
 
     if int(chat_id) != owner_chat_int:
-        tg.send_message(chat_id, '? Unauthorized chat. This bot is owner-locked.')
+        tg.send_message(chat_id, '🔒 Unauthorized chat. This bot is owner-locked.')
         return False
 
     st['last_owner_message_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -201,7 +198,7 @@ def _handle_fast_command(chat_id: int, text: str) -> bool:
         remaining = sup_state.budget_remaining(st)
         budget_str = 'unlimited' if remaining == float('inf') else f'${remaining:.2f}'
         msg = (
-            f'?? service=online\n'
+            f'🟢 service=online\n'
             f'workers={worker_alive}/{worker_total}\n'
             f'pending={pending}, running={running}\n'
             f'budget_remaining={budget_str}\n'
@@ -212,18 +209,16 @@ def _handle_fast_command(chat_id: int, text: str) -> bool:
 
     if cmd in ('/evolve off', '/evolve stop'):
         _set_evolution_mode(False)
-        send_with_budget(chat_id, '?? Evolution: OFF')
+        send_with_budget(chat_id, '🧬 Evolution: OFF')
         return True
 
     if cmd in ('/evolve on', '/evolve start'):
         _set_evolution_mode(True)
-        # Try enqueueing one immediate evolution task so manual start feels responsive.
-        # It still respects idle checks and dead-loop guards in queue.py.
         try:
             sup_queue.enqueue_evolution_task_if_needed(idle_check=True)
         except Exception:
             log.debug('Suppressed exception while enqueuing immediate evolution task', exc_info=True)
-        send_with_budget(chat_id, '?? Evolution: ON')
+        send_with_budget(chat_id, '🧬 Evolution: ON')
         return True
 
     return False
@@ -349,12 +344,22 @@ def _make_context(tg: TelegramClient, consciousness: BackgroundConsciousness) ->
     )
 
 
-def main() -> None:
-    _init_paths()
-    _init_state_module()
+# =============================================================================
+# Main Loop Refactoring - Split into smaller functions per Principle 5
+# =============================================================================
 
-    remote_url = _build_remote_url()
+class LauncherState:
+    """Encapsulates launcher runtime state to avoid global clutter."""
 
+    def __init__(self) -> None:
+        self.last_heartbeat: float = 0.0
+        self.idle_start_time: Optional[float] = None
+        self.last_evolution_trigger_time: float = 0.0
+        self.offset: int = 0
+
+
+def _initialize_subsystems(remote_url: str) -> None:
+    """Initialize all supervisor subsystems."""
     sup_queue.init(DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
     sup_workers.init(
         repo_dir=REPO_DIR,
@@ -373,8 +378,10 @@ def main() -> None:
         branch_dev=BRANCH_DEV,
         branch_stable=BRANCH_STABLE,
     )
-    _refresh_current_sha()
 
+
+def _setup_telegram_client() -> TelegramClient:
+    """Create and configure Telegram client."""
     tg = TelegramClient(TELEGRAM_TOKEN)
     telegram_init(
         drive_root=DRIVE_ROOT,
@@ -382,24 +389,37 @@ def main() -> None:
         budget_report_every=max(1, _safe_int_env('OUROBOROS_BUDGET_REPORT_EVERY_MESSAGES', 10)),
         tg_client=tg,
     )
+    return tg
 
-    sup_workers.spawn_workers(MAX_WORKERS)
-    event_q = sup_workers.get_event_q()
-    consciousness = BackgroundConsciousness(
+
+def _create_consciousness(event_q: queue.Queue) -> BackgroundConsciousness:
+    """Initialize background consciousness."""
+    return BackgroundConsciousness(
         drive_root=DRIVE_ROOT,
         repo_dir=REPO_DIR,
         event_queue=event_q,
         owner_chat_id_fn=_owner_chat_id,
     )
-    ctx = _make_context(tg, consciousness)
-    restored = sup_queue.restore_pending_from_snapshot()
 
-    # Initialize Discord Bridge
-    discord_enabled = init_discord_bridge(REPO_DIR, DRIVE_ROOT)
 
+def _load_launcher_state() -> LauncherState:
+    """Load persisted launcher state."""
+    ls = LauncherState()
     st = load_state()
-    offset = int(st.get('tg_offset') or 0)
+    ls.offset = int(st.get('tg_offset') or 0)
 
+    try:
+        last_evo_iso = str(st.get('last_evolution_task_at') or '').strip()
+        if last_evo_iso:
+            ls.last_evolution_trigger_time = datetime.datetime.fromisoformat(last_evo_iso).timestamp()
+    except Exception:
+        ls.last_evolution_trigger_time = 0.0
+
+    return ls
+
+
+def _log_launcher_startup(restored: int, discord_enabled: bool) -> None:
+    """Log launcher startup event."""
     append_jsonl(
         DRIVE_ROOT / 'logs' / 'supervisor.jsonl',
         {
@@ -414,100 +434,152 @@ def main() -> None:
             'discord_enabled': discord_enabled,
         },
     )
+    log.info('🚀 VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s',
+             MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
 
-    log.info('?? VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s', MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
-    last_heartbeat = 0.0
-    idle_start_time = None  # Track when queue became idle
-    # Track last evolution trigger; initialize from persisted state to avoid
-    # rapid re-trigger loops immediately after restart.
-    last_evolution_trigger_time = 0.0
-    try:
-        last_evo_iso = str(st.get('last_evolution_task_at') or '').strip()
-        if last_evo_iso:
-            last_evolution_trigger_time = datetime.datetime.fromisoformat(last_evo_iso).timestamp()
-    except Exception:
-        last_evolution_trigger_time = 0.0
 
-    while True:
+def _drain_event_queue(event_q: queue.Queue, ctx: Any) -> int:
+    """Drain pending events from the event queue (max 256 per iteration)."""
+    drained = 0
+    while drained < 256:
         try:
-            drained = 0
-            while drained < 256:
-                try:
-                    evt = event_q.get_nowait()
-                except queue.Empty:
-                    break
-                dispatch_event(evt, ctx)
-                drained += 1
-
-            updates = tg.get_updates(offset=offset, timeout=POLL_TIMEOUT)
-            for upd in updates:
-                try:
-                    update_id = int(upd.get('update_id') or 0)
-                except Exception:
-                    continue
-                if update_id >= offset:
-                    offset = update_id + 1
-
-                task = _build_task_from_update(upd, tg)
-                if not task:
-                    continue
-
-                chat_id = int(task['chat_id'])
-                if not _ensure_owner(chat_id, tg):
-                    continue
-
-                if _handle_fast_command(chat_id, str(task.get('text') or '')):
-                    continue
-
-                task['priority'] = -10
-                _preempt_background_task_for_owner_message()
-                sup_queue.enqueue_task(task, front=True)
-                sup_queue.persist_queue_snapshot(reason='owner_message_enqueued_front')
-
-            st = load_state()
-            st['tg_offset'] = int(offset)
-            save_state(st)
-
-            if not sup_workers.WORKERS:
-                sup_workers.spawn_workers(MAX_WORKERS)
-
-            # Drive worker scheduling: keep pool healthy and dispatch queued tasks
-            sup_workers.ensure_workers_healthy()
-            sup_queue.enforce_task_timeouts()
-            sup_workers.assign_tasks()
-
-            # Idle-time evolution: trigger small evolution tasks when system is idle
-            now = time.time()
-            is_queue_empty = (not sup_workers.PENDING) and (not sup_workers.RUNNING)
-
-            if is_queue_empty:
-                if idle_start_time is None:
-                    idle_start_time = now
-                elif IDLE_EVOLUTION_ENABLED:
-                    idle_duration = now - idle_start_time
-                    # Trigger evolution if idle for enough time and not recently triggered
-                    if (idle_duration >= IDLE_TIME_BEFORE_EVOLUTION_SEC and
-                        now - last_evolution_trigger_time >= IDLE_EVOLUTION_MIN_INTERVAL_SEC):
-                        sup_queue.enqueue_evolution_task_if_needed(idle_check=True)
-                        last_evolution_trigger_time = now
-                        idle_start_time = None  # Reset idle timer after triggering
-            else:
-                idle_start_time = None  # Reset idle timer when queue has tasks
-
-            if now - last_heartbeat >= 30:
-                consciousness.heartbeat()
-                last_heartbeat = now
-
-            time.sleep(MAIN_LOOP_SLEEP)
-
-        except KeyboardInterrupt:
-            log.info('Shutting down...')
+            evt = event_q.get_nowait()
+        except queue.Empty:
             break
-        except Exception as e:
-            log.exception('Main loop error: %s', e)
-            time.sleep(1)
+        dispatch_event(evt, ctx)
+        drained += 1
+    return drained
+
+
+def _process_telegram_updates(
+    tg: TelegramClient,
+    ls: LauncherState,
+    ctx: Any
+) -> None:
+    """Fetch and process Telegram updates."""
+    updates = tg.get_updates(offset=ls.offset, timeout=POLL_TIMEOUT)
+    for upd in updates:
+        try:
+            update_id = int(upd.get('update_id') or 0)
+        except Exception:
+            continue
+        if update_id >= ls.offset:
+            ls.offset = update_id + 1
+
+        task = _build_task_from_update(upd, tg)
+        if not task:
+            continue
+
+        chat_id = int(task['chat_id'])
+        if not _ensure_owner(chat_id, tg):
+            continue
+
+        if _handle_fast_command(chat_id, str(task.get('text') or '')):
+            continue
+
+        task['priority'] = -10
+        _preempt_background_task_for_owner_message()
+        sup_queue.enqueue_task(task, front=True)
+        sup_queue.persist_queue_snapshot(reason='owner_message_enqueued_front')
+
+
+def _persist_offset(ls: LauncherState) -> None:
+    """Save current Telegram offset to state."""
+    st = load_state()
+    st['tg_offset'] = int(ls.offset)
+    save_state(st)
+
+
+def _maybe_trigger_idle_evolution(ls: LauncherState) -> None:
+    """Trigger evolution task if system is idle and conditions are met."""
+    now = time.time()
+    is_queue_empty = (not sup_workers.PENDING) and (not sup_workers.RUNNING)
+
+    if is_queue_empty:
+        if ls.idle_start_time is None:
+            ls.idle_start_time = now
+        elif IDLE_EVOLUTION_ENABLED:
+            idle_duration = now - ls.idle_start_time
+            if (idle_duration >= IDLE_TIME_BEFORE_EVOLUTION_SEC and
+                now - ls.last_evolution_trigger_time >= IDLE_EVOLUTION_MIN_INTERVAL_SEC):
+                sup_queue.enqueue_evolution_task_if_needed(idle_check=True)
+                ls.last_evolution_trigger_time = now
+                ls.idle_start_time = None
+    else:
+        ls.idle_start_time = None
+
+
+def _maybe_send_heartbeat(ls: LauncherState, consciousness: BackgroundConsciousness) -> None:
+    """Send periodic heartbeat to background consciousness."""
+    now = time.time()
+    if now - ls.last_heartbeat >= 30:
+        consciousness.heartbeat()
+        ls.last_heartbeat = now
+
+
+def _run_main_loop_iteration(
+    tg: TelegramClient,
+    ls: LauncherState,
+    ctx: Any,
+    consciousness: BackgroundConsciousness
+) -> bool:
+    """Run one iteration of the main loop. Returns False if should exit."""
+    try:
+        _drain_event_queue(sup_workers.get_event_q(), ctx)
+        _process_telegram_updates(tg, ls, ctx)
+        _persist_offset(ls)
+
+        if not sup_workers.WORKERS:
+            sup_workers.spawn_workers(MAX_WORKERS)
+
+        sup_workers.ensure_workers_healthy()
+        sup_queue.enforce_task_timeouts()
+        sup_workers.assign_tasks()
+
+        _maybe_trigger_idle_evolution(ls)
+        _maybe_send_heartbeat(ls, consciousness)
+
+        time.sleep(MAIN_LOOP_SLEEP)
+        return True
+
+    except KeyboardInterrupt:
+        log.info('Shutting down...')
+        return False
+    except Exception as e:
+        log.exception('Main loop error: %s', e)
+        time.sleep(1)
+        return True
+
+
+def main() -> None:
+    """Main entry point - orchestrates initialization and runs the event loop."""
+    # Initialization phase
+    _init_paths()
+    _init_state_module()
+
+    remote_url = _build_remote_url()
+    _initialize_subsystems(remote_url)
+    _refresh_current_sha()
+
+    tg = _setup_telegram_client()
+
+    sup_workers.spawn_workers(MAX_WORKERS)
+    event_q = sup_workers.get_event_q()
+    consciousness = _create_consciousness(event_q)
+    ctx = _make_context(tg, consciousness)
+    restored = sup_queue.restore_pending_from_snapshot()
+
+    discord_enabled = init_discord_bridge(REPO_DIR, DRIVE_ROOT)
+    _log_launcher_startup(restored, discord_enabled)
+
+    # Load persisted state
+    ls = _load_launcher_state()
+
+    # Main event loop
+    while True:
+        if not _run_main_loop_iteration(tg, ls, ctx, consciousness):
+            break
 
 
 if __name__ == '__main__':
     main()
-
