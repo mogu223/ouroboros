@@ -13,6 +13,7 @@ import pathlib
 import threading
 import time
 import uuid
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from supervisor.state import (
@@ -527,7 +528,11 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
     st["last_evolution_context"] = normalized_context
     st["evolution_context_repeat_streak"] = repeat_streak
 
-    repeat_limit = 3
+    try:
+        repeat_limit = int(str(os.environ.get("OUROBOROS_EVOLUTION_REPEAT_LIMIT", "6") or "6").strip())
+    except Exception:
+        repeat_limit = 6
+    repeat_limit = max(2, repeat_limit)
     if repeat_streak >= repeat_limit:
         st["evolution_mode_enabled"] = False
         save_state(st)
