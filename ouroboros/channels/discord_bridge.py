@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 import threading
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,25 @@ class DiscordState:
 
 # ??????
 _state = DiscordState()
+_AUTO_NOTIFY_CHANNEL_ID: Optional[int] = None
+
+
+def _read_discord_config_value(key: str) -> Optional[str]:
+    """Read a Discord config value from env first, then .env.discord."""
+    env_val = str(os.getenv(key, "") or "").strip()
+    if env_val:
+        return env_val
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, value = line.split("=", 1)
+                if k.strip() == key:
+                    v = value.strip()
+                    return v or None
+    return None
 
 
 def _get_discord_token() -> Optional[str]:
@@ -138,6 +157,47 @@ def _get_allowed_users() -> set:
                                     pass
     
     return allowed
+
+
+def _get_notify_channel_id() -> Optional[int]:
+    """Resolve notify channel from env/config if provided."""
+    raw = _read_discord_config_value("DISCORD_NOTIFY_CHANNEL_ID")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        logger.warning("Invalid DISCORD_NOTIFY_CHANNEL_ID: %s", raw)
+        return None
+
+
+def _get_notify_targets() -> Set[int]:
+    """DM targets for notifications: ALLOWED_USERS first, fallback OWNER."""
+    targets: Set[int] = set()
+    targets.update(_get_allowed_users())
+    owner_raw = _read_discord_config_value("DISCORD_OWNER_ID")
+    if owner_raw:
+        try:
+            targets.add(int(owner_raw))
+        except Exception:
+            logger.warning("Invalid DISCORD_OWNER_ID: %s", owner_raw)
+    return targets
+
+
+def _is_evolution_control_command(text: str) -> bool:
+    """Detect evolve control commands from Discord."""
+    cmd = str(text or "").strip().lower()
+    if not cmd:
+        return False
+    if cmd.startswith("/evolve") or cmd.startswith("/evolution"):
+        return True
+    return cmd in {
+        "evolve",
+        "evolution",
+        "toggle evolution",
+        "evolve on",
+        "evolve off",
+    }
 
 
 # ??????????
@@ -246,6 +306,91 @@ def send_discord_message(user_id: int, text: str) -> bool:
         return False
 
 
+def send_discord_channel_message(text: str, channel_id: Optional[int] = None) -> bool:
+    """Send a message to a specific channel, or auto-pick the first writable one."""
+    global _state, _AUTO_NOTIFY_CHANNEL_ID
+    bot = _state.bot
+    loop = _state.event_loop
+    if bot is None or not text:
+        return False
+    if not _state.ready_event.wait(timeout=5.0):
+        logger.error("Discord bot not ready after 5 seconds (channel send)")
+        return False
+
+    try:
+        async def send_to_channel() -> bool:
+            global _AUTO_NOTIFY_CHANNEL_ID
+            target_id = channel_id or _get_notify_channel_id() or _AUTO_NOTIFY_CHANNEL_ID
+            target_channel = None
+
+            if target_id:
+                try:
+                    target_channel = bot.get_channel(int(target_id))
+                    if target_channel is None:
+                        target_channel = await bot.fetch_channel(int(target_id))
+                except Exception as e:
+                    logger.warning("Failed to fetch notify channel %s: %s", target_id, e)
+
+            if target_channel is None:
+                for guild in bot.guilds:
+                    me = guild.me
+                    if me is None:
+                        try:
+                            me = await guild.fetch_member(bot.user.id)
+                        except Exception:
+                            me = None
+                    for channel in guild.text_channels:
+                        try:
+                            if me and not channel.permissions_for(me).send_messages:
+                                continue
+                            target_channel = channel
+                            _AUTO_NOTIFY_CHANNEL_ID = int(channel.id)
+                            logger.info("Auto-selected notify channel: %s (%s)", channel.name, channel.id)
+                            break
+                        except Exception:
+                            continue
+                    if target_channel is not None:
+                        break
+
+            if target_channel is None:
+                logger.warning("No writable Discord text channel found for notification")
+                return False
+
+            chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
+            for chunk in chunks:
+                await target_channel.send(chunk)
+            logger.info("Sent Discord channel notice to %s", getattr(target_channel, "id", "unknown"))
+            return True
+
+        if loop is None:
+            logger.error("Bot event loop not initialized (channel send)")
+            return False
+        future = asyncio.run_coroutine_threadsafe(send_to_channel(), loop)
+        return bool(future.result(timeout=10.0))
+    except Exception as e:
+        logger.error("Error sending Discord channel message: %s", e)
+        return False
+
+
+def broadcast_discord_notice(text: str) -> Dict[str, Any]:
+    """Broadcast notice: DM all targets + send to notify channel."""
+    targets = sorted(_get_notify_targets())
+    dm_ok = 0
+    dm_fail = 0
+    for user_id in targets:
+        if send_discord_message(user_id, text):
+            dm_ok += 1
+        else:
+            dm_fail += 1
+    channel_ok = send_discord_channel_message(text)
+    return {
+        "dm_targets": len(targets),
+        "dm_ok": dm_ok,
+        "dm_fail": dm_fail,
+        "channel_ok": bool(channel_ok),
+    }
+
+
 class DiscordBridge:
     """Discord ???"""
     
@@ -340,6 +485,11 @@ class DiscordBridge:
         
         logger.info(f"?? Message from {username} ({user_id}) in {channel_type}: {content[:50]}...")
 
+        if _is_evolution_control_command(content):
+            await message.channel.send("? Evolution control is Telegram-only. ?? Telegram ?? /evolve on|off?")
+            logger.info("Blocked Discord evolution control command from %s (%s)", username, user_id)
+            return
+
         active_conversations[user_id] = {
             "channel_id": int(message.channel.id),
             "is_dm": isinstance(message.channel, discord.DMChannel),
@@ -359,7 +509,12 @@ class DiscordBridge:
                 # ?? Discord ?? ID ?? chat_id?????????????? Discord?
                 # Telegram ?????Discord ????????
                 chat_id = -1000000000000 - user_id
-                handle_chat_direct(chat_id=chat_id, text=content, image_data=None)
+                handle_chat_direct(
+                    chat_id=chat_id,
+                    text=content,
+                    image_data=None,
+                    source_platform="discord",
+                )
             except Exception as e:
                 logger.error(f"? Error in handle_chat_direct: {e}", exc_info=True)
         
@@ -474,4 +629,5 @@ if __name__ == "__main__":
     
     bridge = create_bridge()
     bridge.run()
+
 

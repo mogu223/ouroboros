@@ -159,7 +159,7 @@ def _ensure_owner(chat_id: int, tg: TelegramClient) -> bool:
         st['owner_id'] = int(chat_id)
         st['last_owner_message_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_state(st)
-        send_with_budget(int(chat_id), '✅ Owner registered. Ouroboros is online.')
+        send_with_budget(int(chat_id), '? Owner registered. Ouroboros is online.')
         return True
 
     try:
@@ -168,7 +168,7 @@ def _ensure_owner(chat_id: int, tg: TelegramClient) -> bool:
         owner_chat_int = int(chat_id)
 
     if int(chat_id) != owner_chat_int:
-        tg.send_message(chat_id, '⛔ Unauthorized chat. This bot is owner-locked.')
+        tg.send_message(chat_id, '? Unauthorized chat. This bot is owner-locked.')
         return False
 
     st['last_owner_message_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -200,7 +200,7 @@ def _handle_fast_command(chat_id: int, text: str) -> bool:
         remaining = sup_state.budget_remaining(st)
         budget_str = 'unlimited' if remaining == float('inf') else f'${remaining:.2f}'
         msg = (
-            f'🟢 service=online\n'
+            f'?? service=online\n'
             f'workers={worker_alive}/{worker_total}\n'
             f'pending={pending}, running={running}\n'
             f'budget_remaining={budget_str}\n'
@@ -211,12 +211,12 @@ def _handle_fast_command(chat_id: int, text: str) -> bool:
 
     if cmd in ('/evolve off', '/evolve stop'):
         _set_evolution_mode(False)
-        send_with_budget(chat_id, '🧬 Evolution: OFF')
+        send_with_budget(chat_id, '?? Evolution: OFF')
         return True
 
     if cmd in ('/evolve on', '/evolve start'):
         _set_evolution_mode(True)
-        send_with_budget(chat_id, '🧬 Evolution: ON')
+        send_with_budget(chat_id, '?? Evolution: ON')
         return True
 
     return False
@@ -272,6 +272,7 @@ def _build_task_from_update(update: Dict[str, Any], tg: TelegramClient) -> Optio
         'chat_id': int(chat_id),
         'text': text,
         '_is_direct_chat': True,
+        'source_platform': 'telegram',
     }
 
     if image_b64:
@@ -407,7 +408,7 @@ def main() -> None:
         },
     )
 
-    log.info('🚀 VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s', MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
+    log.info('?? VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s', MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
     last_heartbeat = 0.0
     idle_start_time = None  # Track when queue became idle
     last_evolution_trigger_time = 0.0  # Track last evolution trigger
@@ -494,3 +495,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+

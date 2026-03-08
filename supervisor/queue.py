@@ -1,5 +1,5 @@
 """
-Supervisor — Task queue management.
+Supervisor ? Task queue management.
 
 Queue operations, priority, timeouts, persistence, evolution/review scheduling.
 """
@@ -279,7 +279,7 @@ def enforce_task_timeouts() -> None:
             if owner_chat_id:
                 send_with_budget(
                     owner_chat_id,
-                    f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "
+                    f"?? Task {task_id} running for {int(runtime_sec)}s. "
                     f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s. Continuing.",
                 )
 
@@ -330,12 +330,12 @@ def enforce_task_timeouts() -> None:
         if owner_chat_id:
             if requeued:
                 send_with_budget(owner_chat_id, (
-                    f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
+                    f"?? Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
                     f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}."
                 ))
             else:
                 send_with_budget(owner_chat_id, (
-                    f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
+                    f"?? Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
                     f"Worker {worker_id} restarted. Retry limit exhausted, task stopped."
                 ))
 
@@ -357,35 +357,49 @@ def build_evolution_task_text(cycle: int, context: str = "") -> str:
     base_prompt = f"EVOLUTION #{cycle}"
 
     if context:
-        return f"{base_prompt}: {context}"
+        return (
+            f"{base_prompt}: {context}\n\n"
+            "??????????\n"
+            "????????????? Markdown ???\n"
+            "## EVOLUTION_CAPABILITY_SUMMARY\n"
+            "?3-8??????????\n"
+            "## DISCORD_TASK_PLAYBOOK\n"
+            "?? Discord ?????????????????????????\n"
+        )
 
     # Open-ended prompt - let Ouroboros decide
     return (
-        f"{base_prompt} - 自主进化\n\n"
-        "【原则】\n"
-        "- 自主分析，自主决定，自主执行\n"
-        "- 不要询问主人，直接做改进\n"
-        "- 以结果为导向：代码能跑、测试通过、性能提升\n"
-        "- 完成一个改进就提交一个 commit\n\n"
-        "【分析方向】\n"
-        "1. 检查 logs/tools.jsonl 找出经常失败的工具\n"
-        "2. 检查 logs/events.jsonl 找出超时和错误模式\n"
-        "3. 读取代码，找到复杂度和重复代码\n"
-        "4. 回顾对话历史，找出主人的痛点\n\n"
-        "【行动指南】\n"
-        "- 发现问题 → 直接修复 → 提交代码\n"
-        "- 不要说'我需要重启'，直接修改代码让它工作\n"
-        "- 不要说'你想让我做什么'，自己决定做什么\n"
-        "- 小步快跑：改一点 → 测试 → 提交 → 继续\n\n"
-        "【完成标准】\n"
-        "- 代码改动已 commit\n"
-        "- 至少一个具体问题被解决\n"
-        "- 有 measurable 的改进（错误减少、速度变快、代码变短）"
+        f"{base_prompt} - ????\n\n"
+        "????\n"
+        "- ??????????????\n"
+        "- ????????????\n"
+        "- ?????????????????????\n"
+        "- ??????????? commit\n\n"
+        "??????\n"
+        "1. ?? logs/tools.jsonl ?????????\n"
+        "2. ?? logs/events.jsonl ?????????\n"
+        "3. ???????????????\n"
+        "4. ??????????????\n\n"
+        "??????\n"
+        "- ???? ? ???? ? ????\n"
+        "- ???'?????'???????????\n"
+        "- ???'???????'????????\n"
+        "- ???????? ? ?? ? ?? ? ??\n\n"
+        "??????\n"
+        "- ????? commit\n"
+        "- ???????????\n"
+        "- ? measurable ???????????????????\n\n"
+        "??????????\n"
+        "????????????? Markdown ???\n"
+        "## EVOLUTION_CAPABILITY_SUMMARY\n"
+        "- ?????????3-8??\n"
+        "## DISCORD_TASK_PLAYBOOK\n"
+        "- ?? Discord ????????????????????\n"
     )
 
 
 def build_review_task_text(reason: str) -> str:
-    """Build review task text. Minimal trigger — LLM decides scope and depth."""
+    """Build review task text. Minimal trigger ? LLM decides scope and depth."""
     return f"REVIEW: {reason or 'owner request'}"
 
 
@@ -402,9 +416,10 @@ def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
         "id": tid, "type": "review",
         "chat_id": int(owner_chat_id),
         "text": build_review_task_text(reason=reason),
+        "source_platform": "telegram",
     })
     persist_queue_snapshot(reason="review_enqueued")
-    send_with_budget(int(owner_chat_id), f"🔎 Review queued: {tid} ({reason})")
+    send_with_budget(int(owner_chat_id), f"?? Review queued: {tid} ({reason})")
     return tid
 
 
@@ -435,7 +450,7 @@ def analyze_evolution_context() -> str:
                         entry = json.loads(line.strip())
                         if "result_preview" in entry:
                             result = entry.get("result_preview", "")
-                            if "⚠️" in result or "ERROR" in result or "failed" in result.lower():
+                            if "??" in result or "ERROR" in result or "failed" in result.lower():
                                 tool = entry.get("tool", "unknown")
                                 error_counts[tool] = error_counts.get(tool, 0) + 1
                     except (json.JSONDecodeError, KeyError):
@@ -445,7 +460,7 @@ def analyze_evolution_context() -> str:
             sorted_errors = sorted(error_counts.items(), key=lambda x: x[1], reverse=True)[:3]
             for tool, count in sorted_errors:
                 if count >= 3:  # Only report if 3+ failures
-                    issues.append(f"工具 '{tool}' 失败 {count} 次")
+                    issues.append(f"?? '{tool}' ?? {count} ?")
         except Exception:
             pass
 
@@ -460,12 +475,12 @@ def analyze_evolution_context() -> str:
                     if "timeout" in line.lower():
                         timeout_count += 1
             if timeout_count >= 5:
-                issues.append(f"最近有 {timeout_count} 次超时事件")
+                issues.append(f"??? {timeout_count} ?????")
         except Exception:
             pass
 
     if issues:
-        return "发现问题:\n" + "\n".join(f"- {i}" for i in issues[:5])
+        return "????:\n" + "\n".join(f"- {i}" for i in issues[:5])
 
     return ""
 
@@ -500,7 +515,7 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
         # Don't stop evolution - just notify owner
         send_with_budget(
             int(owner_chat_id),
-            f"🧬 Budget low: ${remaining:.2f} remaining. Evolution continuing..."
+            f"?? Budget low: ${remaining:.2f} remaining. Evolution continuing..."
         )
 
     cycle = int(st.get("evolution_cycle") or 0) + 1
@@ -514,6 +529,7 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
         "id": tid, "type": "evolution",
         "chat_id": int(owner_chat_id),
         "text": task_text,
+        "source_platform": "telegram",
     })
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -523,7 +539,8 @@ def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
     if context:
         send_with_budget(
             int(owner_chat_id),
-            f"🧬 Evolution #{cycle}: {tid}\n{context[:200]}"
+            f"?? Evolution #{cycle}: {tid}\n{context[:200]}"
         )
     else:
-        send_with_budget(int(owner_chat_id), f"🧬 Evolution #{cycle}: {tid} 自主进化中...")
+        send_with_budget(int(owner_chat_id), f"?? Evolution #{cycle}: {tid} ?????...")
+

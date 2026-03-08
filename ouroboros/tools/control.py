@@ -19,7 +19,7 @@ MAX_SUBTASK_DEPTH = 3
 
 def _request_restart(ctx: ToolContext, reason: str) -> str:
     if str(ctx.current_task_type or "") == "evolution" and not ctx.last_push_succeeded:
-        return "⚠️ RESTART_BLOCKED: in evolution mode, commit+push first."
+        return "?? RESTART_BLOCKED: in evolution mode, commit+push first."
     # Persist expected SHA for post-restart verification
     try:
         sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
@@ -55,7 +55,7 @@ def _schedule_task(ctx: ToolContext, description: str, context: str = "", parent
                 "ts": utc_now_iso(),
                 "type": "schedule_task_from_direct_chat",
                 "description": description[:200],
-                "warning": "schedule_task called from direct chat context — potential duplicate work",
+                "warning": "schedule_task called from direct chat context ? potential duplicate work",
             })
         except Exception:
             pass
@@ -103,13 +103,13 @@ def _update_scratchpad(ctx: ToolContext, content: str) -> str:
 def _send_owner_message(ctx: ToolContext, text: str, reason: str = "") -> str:
     """Send a proactive message to the owner (not as reply to a task).
 
-    Use when you have something genuinely worth saying — an insight,
+    Use when you have something genuinely worth saying ? an insight,
     a question, a status update, or an invitation to collaborate.
     """
     if not ctx.current_chat_id:
-        return "⚠️ No active chat — cannot send proactive message."
+        return "?? No active chat ? cannot send proactive message."
     if not text or not text.strip():
-        return "⚠️ Empty message."
+        return "?? Empty message."
 
     from ouroboros.utils import append_jsonl
     ctx.pending_events.append({
@@ -139,9 +139,15 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
 
 def _toggle_evolution(ctx: ToolContext, enabled: bool) -> str:
     """Toggle evolution mode on/off via supervisor event."""
+    source_platform = str(getattr(ctx, "current_source_platform", "") or "").strip().lower()
+    if source_platform == "discord":
+        return "? Evolution control is Telegram-only. ?? Telegram ?? /evolve on|off?"
+
     ctx.pending_events.append({
         "type": "toggle_evolution",
         "enabled": bool(enabled),
+        "source_platform": source_platform or "unknown",
+        "chat_id": ctx.current_chat_id,
         "ts": utc_now_iso(),
     })
     state_str = "ON" if enabled else "OFF"
@@ -169,7 +175,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
 
     if model:
         if model not in available:
-            return f"⚠️ Unknown model: {model}. Available: {', '.join(available)}"
+            return f"?? Unknown model: {model}. Available: {', '.join(available)}"
         ctx.active_model_override = model
         changes.append(f"model={model}")
 
@@ -222,7 +228,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "schedule_task",
             "description": "Schedule a background task. Returns task_id for later retrieval. For complex tasks, decompose into focused subtasks with clear scope.",
             "parameters": {"type": "object", "properties": {
-                "description": {"type": "string", "description": "Task description — be specific about scope and expected deliverable"},
+                "description": {"type": "string", "description": "Task description ? be specific about scope and expected deliverable"},
                 "context": {"type": "string", "description": "Optional context from parent task: background info, constraints, style guide, etc."},
                 "parent_task_id": {"type": "string", "description": "Optional parent task ID for tracking lineage"},
             }, "required": ["description"]},
@@ -250,7 +256,7 @@ def get_tools() -> List[ToolEntry]:
         }, _chat_history),
         ToolEntry("update_scratchpad", {
             "name": "update_scratchpad",
-            "description": "Update your working memory. Write freely — any format you find useful. "
+            "description": "Update your working memory. Write freely ? any format you find useful. "
                            "This persists across sessions and is read at every task start.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "Full scratchpad content"},
@@ -259,7 +265,7 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("send_owner_message", {
             "name": "send_owner_message",
             "description": "Send a proactive message to the owner. Use when you have something "
-                           "genuinely worth saying — an insight, a question, or an invitation to collaborate. "
+                           "genuinely worth saying ? an insight, a question, or an invitation to collaborate. "
                            "This is NOT for task responses (those go automatically).",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
@@ -314,3 +320,4 @@ def get_tools() -> List[ToolEntry]:
             }},
         }, _wait_for_task),
     ]
+

@@ -1,5 +1,5 @@
 """
-Ouroboros — Tool registry (SSOT).
+Ouroboros ? Tool registry (SSOT).
 
 Plugin architecture: each module in tools/ exports get_tools().
 ToolRegistry collects all tools, provides schemas() and execute().
@@ -27,7 +27,7 @@ class BrowserState:
 
 @dataclass
 class ToolContext:
-    """Tool execution context — passed from the agent before each task."""
+    """Tool execution context ? passed from the agent before each task."""
 
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
@@ -35,6 +35,7 @@ class ToolContext:
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
     current_task_type: Optional[str] = None
+    current_source_platform: Optional[str] = None
     last_push_succeeded: bool = False
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
 
@@ -187,13 +188,13 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         entry = self._entries.get(name)
         if entry is None:
-            return f"⚠️ Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
+            return f"?? Unknown tool: {name}. Available: {', '.join(sorted(self._entries.keys()))}"
         try:
             return entry.handler(self._ctx, **args)
         except TypeError as e:
-            return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
+            return f"?? TOOL_ARG_ERROR ({name}): {e}"
         except Exception as e:
-            return f"⚠️ TOOL_ERROR ({name}): {e}"
+            return f"?? TOOL_ERROR ({name}): {e}"
 
     def override_handler(self, name: str, handler) -> None:
         """Override the handler for a registered tool (used for closure injection)."""
@@ -223,3 +224,4 @@ def _compat_browser_prop(self):
 if not hasattr(ToolRegistry, 'browser'):
     ToolRegistry.browser = property(_compat_browser_prop)
 # --- end runtime compatibility patch ---
+

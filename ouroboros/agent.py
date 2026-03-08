@@ -1,5 +1,5 @@
 """
-Ouroboros agent core — thin orchestrator.
+Ouroboros agent core ? thin orchestrator.
 
 Delegates to: loop.py (LLM tool loop), tools/ (tool schemas/execution),
 llm.py (LLM calls), memory.py (scratchpad/identity),
@@ -382,6 +382,12 @@ class OuroborosAgent:
         drive_logs = self.env.drive_path("logs")
         sanitized_task = sanitize_task_for_event(task, drive_logs)
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
+        source_platform = str(task.get("source_platform") or "").strip().lower()
+        if source_platform not in ("telegram", "discord"):
+            try:
+                source_platform = "discord" if int(task.get("chat_id")) < -1000000000000 else "telegram"
+            except Exception:
+                source_platform = "unknown"
 
         # Set tool context for this task
         ctx = ToolContext(
@@ -390,6 +396,7 @@ class OuroborosAgent:
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
             current_task_type=self._current_task_type,
+            current_source_platform=source_platform,
             event_queue=self._event_queue,
             task_id=str(task.get("id") or ""),
             task_depth=int(task.get("depth", 0) or 0),
@@ -414,6 +421,12 @@ class OuroborosAgent:
         task_id = task.get("id", "unknown")
         task_type = task.get("type", "task")
         self._current_task_type = task_type
+        source_platform = str(task.get("source_platform") or "").strip().lower()
+        if source_platform not in ("telegram", "discord"):
+            try:
+                source_platform = "discord" if int(task.get("chat_id")) < -1000000000000 else "telegram"
+            except Exception:
+                source_platform = "unknown"
 
         chat_id = task.get("chat_id")
         if chat_id:
@@ -480,6 +493,7 @@ class OuroborosAgent:
                 "text": str(final_text),
                 "format": "markdown",
                 "is_progress": False,
+                "source_platform": source_platform,
             })
 
         if isinstance(usage, dict) and usage:
@@ -490,17 +504,33 @@ class OuroborosAgent:
                 "category": str(task_type or "task"),
                 "model": str((llm_trace or {}).get("model_used") or task.get("model") or ""),
                 "usage": usage,
+                "source_platform": source_platform,
             })
+
+        result_summary = str(final_text or "").strip()
+        if len(result_summary) > 6000:
+            result_summary = result_summary[:6000] + f"\n...(truncated, original {len(str(final_text or ''))} chars)"
 
         events.append({
             "ts": utc_now_iso(),
             "type": "task_done",
             "task_id": str(task_id),
             "task_type": str(task_type or "task"),
+            "chat_id": chat_id_int,
+            "source_platform": source_platform,
             "cost_usd": float((usage or {}).get("cost") or 0.0),
             "total_rounds": int((usage or {}).get("rounds") or 0),
             "duration_sec": round(time.time() - started_at, 3),
+            "result_summary": result_summary,
         })
+
+        if self._pending_events:
+            for pending_evt in list(self._pending_events):
+                evt = dict(pending_evt)
+                evt.setdefault("ts", utc_now_iso())
+                evt.setdefault("source_platform", source_platform)
+                events.append(evt)
+            self._pending_events.clear()
 
         self._busy = False
         self._current_chat_id = None
@@ -540,5 +570,6 @@ def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> Ourob
 
 # Alias for backward compatibility
 OuroborosAgent.handle_task = OuroborosAgent.run_task
+
 
 

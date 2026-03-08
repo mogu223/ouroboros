@@ -15,7 +15,7 @@ import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.utils import (
-    utc_now_iso, read_text, clip_text, estimate_tokens, get_git_info,
+    utc_now_iso, read_text, clip_text, estimate_tokens, get_git_info, append_jsonl,
 )
 from ouroboros.memory import Memory
 
@@ -91,18 +91,69 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
         pass
 
     # --- Runtime context JSON ---
+    source_platform = str(task.get("source_platform") or "").strip().lower()
+    if source_platform not in ("telegram", "discord"):
+        try:
+            source_platform = "discord" if int(task.get("chat_id")) < -1000000000000 else "telegram"
+        except Exception:
+            source_platform = "unknown"
+
     runtime_data = {
         "utc_now": utc_now_iso(),
         "repo_dir": str(env.repo_dir),
         "drive_root": str(env.drive_root),
         "git_head": git_sha,
         "git_branch": git_branch,
-        "task": {"id": task.get("id"), "type": task.get("type")},
+        "task": {"id": task.get("id"), "type": task.get("type"), "source_platform": source_platform},
     }
     if budget_info:
         runtime_data["budget"] = budget_info
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     return "## Runtime context\n\n" + runtime_ctx
+
+
+def _build_discord_playbook_section(env: Any, task: Dict[str, Any]) -> str:
+    """Inject the latest Discord playbook for Discord-origin tasks."""
+    source_platform = str(task.get("source_platform") or "").strip().lower()
+    if source_platform not in ("telegram", "discord"):
+        try:
+            source_platform = "discord" if int(task.get("chat_id")) < -1000000000000 else "telegram"
+        except Exception:
+            source_platform = "unknown"
+    if source_platform != "discord":
+        return ""
+
+    playbook_path = env.drive_path("memory/discord_task_playbook.md")
+    if not playbook_path.exists():
+        return ""
+
+    playbook_text = read_text(playbook_path).strip()
+    if not playbook_text:
+        return ""
+
+    # Best-effort observability for acceptance checks
+    try:
+        cycle = ""
+        for line in playbook_text.splitlines()[:12]:
+            lower = line.lower()
+            if lower.startswith("evolutioncycle:"):
+                cycle = line.split(":", 1)[1].strip()
+                break
+        append_jsonl(
+            env.drive_path("logs/events.jsonl"),
+            {
+                "ts": utc_now_iso(),
+                "type": "discord_playbook_loaded",
+                "task_id": str(task.get("id") or ""),
+                "cycle": cycle,
+                "chars": len(playbook_text),
+            },
+        )
+    except Exception:
+        log.debug("Failed to log discord_playbook_loaded", exc_info=True)
+
+    cap = _safe_int_env("OUROBOROS_DISCORD_PLAYBOOK_MAX_CHARS", 24000, 1000, 120000)
+    return "## Discord Task Playbook\n\n" + clip_text(playbook_text, cap)
 
 
 def _build_memory_sections(memory: Memory) -> List[str]:
@@ -187,7 +238,7 @@ def _build_health_invariants(env: Any) -> str:
                 pyproject_ver = line.split("=", 1)[1].strip().strip('"').strip("'")
                 break
         if ver_file and pyproject_ver and ver_file != pyproject_ver:
-            checks.append(f"CRITICAL: VERSION DESYNC — VERSION={ver_file}, pyproject.toml={pyproject_ver}")
+            checks.append(f"CRITICAL: VERSION DESYNC ? VERSION={ver_file}, pyproject.toml={pyproject_ver}")
         elif ver_file:
             checks.append(f"OK: version sync ({ver_file})")
     except Exception:
@@ -201,7 +252,7 @@ def _build_health_invariants(env: Any) -> str:
             drift_pct = state_data.get("budget_drift_pct", 0)
             our = state_data.get("spent_usd", 0)
             theirs = state_data.get("openrouter_total_usd", 0)
-            checks.append(f"WARNING: BUDGET DRIFT {drift_pct:.1f}% — tracked=${our:.2f} vs OpenRouter=${theirs:.2f}")
+            checks.append(f"WARNING: BUDGET DRIFT {drift_pct:.1f}% ? tracked=${our:.2f} vs OpenRouter=${theirs:.2f}")
         else:
             checks.append("OK: budget drift within tolerance")
     except Exception:
@@ -213,7 +264,7 @@ def _build_health_invariants(env: Any) -> str:
         costly = [t for t in per_task_cost_summary(5) if t["cost"] > 5.0]
         for t in costly:
             checks.append(
-                f"WARNING: HIGH-COST TASK — task_id={t['task_id']} "
+                f"WARNING: HIGH-COST TASK ? task_id={t['task_id']} "
                 f"cost=${t['cost']:.2f} rounds={t['rounds']}"
             )
         if not costly:
@@ -228,7 +279,7 @@ def _build_health_invariants(env: Any) -> str:
         if identity_path.exists():
             age_hours = (_time.time() - identity_path.stat().st_mtime) / 3600
             if age_hours > 8:
-                checks.append(f"WARNING: STALE IDENTITY — identity.md last updated {age_hours:.0f}h ago")
+                checks.append(f"WARNING: STALE IDENTITY ? identity.md last updated {age_hours:.0f}h ago")
             else:
                 checks.append("OK: identity.md recent")
     except Exception:
@@ -282,7 +333,7 @@ def _build_health_invariants(env: Any) -> str:
         dupes = {h: tids for h, tids in msg_hash_to_tasks.items() if len(tids) > 1}
         if dupes:
             checks.append(
-                f"CRITICAL: DUPLICATE PROCESSING — {len(dupes)} message(s) "
+                f"CRITICAL: DUPLICATE PROCESSING ? {len(dupes)} message(s) "
                 f"appeared in multiple tasks: {', '.join(str(sorted(tids)) for tids in dupes.values())}"
             )
         else:
@@ -296,7 +347,7 @@ def _build_health_invariants(env: Any) -> str:
         cb = get_circuit_breaker()
         blocked = cb.get_blocked_models()
         if blocked:
-            checks.append(f"WARNING: CIRCUIT BREAKER — {len(blocked)} model(s) blocked: {', '.join(blocked)}")
+            checks.append(f"WARNING: CIRCUIT BREAKER ? {len(blocked)} model(s) blocked: {', '.join(blocked)}")
         else:
             checks.append("OK: all models available")
     except Exception:
@@ -343,9 +394,9 @@ def build_llm_messages(
     memory.ensure_files()
 
     # --- Assemble messages with 3-block prompt caching ---
-    # Block 1: Static content (SYSTEM.md + BIBLE.md + README) — cached
-    # Block 2: Semi-stable content (identity + scratchpad + knowledge) — cached
-    # Block 3: Dynamic content (state + runtime + recent logs) — uncached
+    # Block 1: Static content (SYSTEM.md + BIBLE.md + README) ? cached
+    # Block 2: Semi-stable content (identity + scratchpad + knowledge) ? cached
+    # Block 3: Dynamic content (state + runtime + recent logs) ? uncached
 
     # BIBLE.md always included (Constitution requires it for every decision)
     # README.md only for evolution/review (architecture context)
@@ -376,7 +427,11 @@ def build_llm_messages(
         _build_runtime_section(env, task),
     ]
 
-    # Health invariants — surfaces anomalies for LLM-first self-detection (Bible P0+P3)
+    discord_playbook = _build_discord_playbook_section(env, task)
+    if discord_playbook:
+        dynamic_parts.append(discord_playbook)
+
+    # Health invariants ? surfaces anomalies for LLM-first self-detection (Bible P0+P3)
     health_section = _build_health_invariants(env)
     if health_section:
         dynamic_parts.append(health_section)
@@ -515,7 +570,7 @@ def _compact_tool_result(msg: dict, content: str) -> dict:
     Returns:
         Compacted message dict
     """
-    is_error = content.startswith("⚠️")
+    is_error = content.startswith("??")
     # Create a short summary
     if is_error:
         summary = content[:200]  # Keep error details
@@ -799,3 +854,4 @@ def _safe_read(path: pathlib.Path, fallback: str = "") -> str:
         log.debug(f"Failed to read file {path} in _safe_read", exc_info=True)
         pass
     return fallback
+

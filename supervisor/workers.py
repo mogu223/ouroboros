@@ -1,5 +1,5 @@
 """
-Supervisor — Worker lifecycle management.
+Supervisor ? Worker lifecycle management.
 
 Multiprocessing workers, worker health, direct chat handling.
 Queue operations moved to supervisor.queue.
@@ -140,15 +140,24 @@ def _get_chat_agent():
     return _chat_agent
 
 
-def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None) -> None:
+def handle_chat_direct(
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    source_platform: str = "",
+) -> None:
     try:
         agent = _get_chat_agent()
+        inferred_source = str(source_platform or "").strip().lower()
+        if not inferred_source:
+            inferred_source = "discord" if int(chat_id) < -1000000000000 else "telegram"
         task = {
             "id": uuid.uuid4().hex[:8],
             "type": "task",
             "chat_id": chat_id,
             "text": text,
             "_is_direct_chat": True,
+            "source_platform": inferred_source,
         }
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption)
@@ -167,7 +176,7 @@ def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple
             get_event_q().put(e)
     except Exception as e:
         import traceback
-        err_msg = f"⚠️ Error: {type(e).__name__}: {e}"
+        err_msg = f"?? Error: {type(e).__name__}: {e}"
         append_jsonl(
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
@@ -252,7 +261,7 @@ def auto_resume_after_restart() -> None:
             threading.Thread(
                 target=handle_chat_direct,
                 args=(int(chat_id),
-                      "[auto-resume after restart] Continue your work. Read scratchpad and identity — they contain context of what you were doing.",
+                      "[auto-resume after restart] Continue your work. Read scratchpad and identity ? they contain context of what you were doing.",
                       None),
                 daemon=True,
             ).start()
@@ -310,6 +319,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
                         "text": f"SYSTEM_ERROR: {type(_e).__name__}: {_e}",
                         "format": "markdown",
                         "is_progress": False,
+                        "source_platform": str(failed_task.get("source_platform") or ""),
                         "worker_id": wid,
                     })
                 if failed_task.get("id"):
@@ -317,6 +327,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
                         "type": "task_done",
                         "task_id": str(failed_task.get("id")),
                         "task_type": str(failed_task.get("type") or "task"),
+                        "source_platform": str(failed_task.get("source_platform") or ""),
                         "cost_usd": 0.0,
                         "total_rounds": 0,
                         "duration_sec": 0.0,
@@ -445,7 +456,7 @@ def _verify_worker_sha_after_spawn(events_offset: int, timeout_sec: float = 90.0
     if not ok and st.get("owner_chat_id"):
         send_with_budget(
             int(st["owner_chat_id"]),
-            f"⚠️ Worker SHA mismatch after spawn: expected {expected_sha[:8]}, got {(observed_sha or 'unknown')[:8]}",
+            f"?? Worker SHA mismatch after spawn: expected {expected_sha[:8]}, got {(observed_sha or 'unknown')[:8]}",
         )
 
 
@@ -533,7 +544,7 @@ def assign_tasks() -> None:
                     chosen_idx = i
                     break
                 if chosen_idx is None:
-                    # Only over-budget evolution tasks remain — clean them out
+                    # Only over-budget evolution tasks remain ? clean them out
                     PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]
                     queue.persist_queue_snapshot(reason="evolution_dropped_budget")
                     continue
@@ -573,7 +584,7 @@ def assign_tasks() -> None:
                 if task_type in ("evolution", "review"):
                     st = load_state()
                     if st.get("owner_chat_id"):
-                        emoji = '🧬' if task_type == 'evolution' else '🔎'
+                        emoji = '??' if task_type == 'evolution' else '??'
                         send_with_budget(
                             int(st["owner_chat_id"]),
                             f"{emoji} {task_type.capitalize()} task {task['id']} started.",
@@ -587,7 +598,7 @@ def assign_tasks() -> None:
 
 def ensure_workers_healthy() -> None:
     from supervisor import queue
-    # Grace period: skip health check right after spawn — workers need time to initialize
+    # Grace period: skip health check right after spawn ? workers need time to initialize
     if (time.time() - _LAST_SPAWN_TIME) < _SPAWN_GRACE_SEC:
         return
     busy_crashes = 0
@@ -630,7 +641,7 @@ def ensure_workers_healthy() -> None:
 
     CRASH_TS[:] = [t for t in CRASH_TS if (now - t) < 60.0]
     if len(CRASH_TS) >= 3:
-        # Log crash storm but DON'T execv restart — that creates infinite loops.
+        # Log crash storm but DON'T execv restart ? that creates infinite loops.
         # Instead: kill dead workers, notify owner, continue with direct-chat (threading).
         st = load_state()
         append_jsonl(
@@ -645,12 +656,13 @@ def ensure_workers_healthy() -> None:
         if st.get("owner_chat_id"):
             send_with_budget(
                 int(st["owner_chat_id"]),
-                "⚠️ Frequent worker crashes. Multiprocessing workers disabled, "
+                "?? Frequent worker crashes. Multiprocessing workers disabled, "
                 "continuing in direct-chat mode (threading).",
             )
-        # Kill all workers — direct chat via handle_chat_direct still works
+        # Kill all workers ? direct chat via handle_chat_direct still works
         kill_workers()
         CRASH_TS.clear()
+
 
 
 
