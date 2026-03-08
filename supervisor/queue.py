@@ -488,58 +488,77 @@ def analyze_evolution_context() -> str:
 def enqueue_evolution_task_if_needed(idle_check: bool = True) -> None:
     """Enqueue evolution task if evolution mode is enabled.
 
-    No circuit breaker - evolution continues regardless of failures.
-    Failures are learning opportunities.
+    Adds a dead-loop guard: if the same non-empty evolution context repeats
+    multiple cycles in a row, auto-pause evolution mode.
 
     Args:
         idle_check: If True, only enqueue when queue is completely empty.
     """
-    # Idle-time evolution: only run when no other tasks are pending/running
     if idle_check and (PENDING or RUNNING):
         return
 
     st = load_state()
     if not bool(st.get("evolution_mode_enabled")):
         return
+
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
         return
 
-    # No circuit breaker - allow continuous evolution regardless of failures
-    # Reset failure counter to keep trying
-    st["evolution_consecutive_failures"] = 0
-    save_state(st)
-
     remaining = budget_remaining(st)
     if remaining < EVOLUTION_BUDGET_RESERVE:
-        # Don't stop evolution - just notify owner
         send_with_budget(
             int(owner_chat_id),
-            f"?? Budget low: ${remaining:.2f} remaining. Evolution continuing..."
+            f"?? Budget low: ${remaining:.2f} remaining. Evolution continuing...",
         )
 
     cycle = int(st.get("evolution_cycle") or 0) + 1
-
-    # Analyze current state for context
     context = analyze_evolution_context()
+
+    normalized_context = " ".join(str(context or "").split())[:400]
+    last_context = str(st.get("last_evolution_context") or "")
+    repeat_streak = int(st.get("evolution_context_repeat_streak") or 0)
+
+    if normalized_context and normalized_context == last_context:
+        repeat_streak += 1
+    else:
+        repeat_streak = 0
+
+    st["last_evolution_context"] = normalized_context
+    st["evolution_context_repeat_streak"] = repeat_streak
+
+    repeat_limit = 3
+    if repeat_streak >= repeat_limit:
+        st["evolution_mode_enabled"] = False
+        save_state(st)
+        send_with_budget(
+            int(owner_chat_id),
+            f"???? Evolution auto-paused: same issue context repeated {repeat_streak + 1} cycles. Use /evolve start after manual intervention.",
+        )
+        return
+
     task_text = build_evolution_task_text(cycle, context if context else "")
 
     tid = uuid.uuid4().hex[:8]
-    enqueue_task({
-        "id": tid, "type": "evolution",
-        "chat_id": int(owner_chat_id),
-        "text": task_text,
-        "source_platform": "telegram",
-    })
+    enqueue_task(
+        {
+            "id": tid,
+            "type": "evolution",
+            "chat_id": int(owner_chat_id),
+            "text": task_text,
+            "source_platform": "telegram",
+        }
+    )
+
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    st["evolution_consecutive_failures"] = 0
     save_state(st)
 
-    # Send notification
     if context:
         send_with_budget(
             int(owner_chat_id),
-            f"?? Evolution #{cycle}: {tid}\n{context[:200]}"
+            f"?? Evolution #{cycle}: {tid}\n{context[:200]}",
         )
     else:
         send_with_budget(int(owner_chat_id), f"?? Evolution #{cycle}: {tid} ?????...")

@@ -69,6 +69,7 @@ EVOLUTION_WALL_TIME_SEC = max(30, _safe_int_env('OUROBOROS_EVOLUTION_WALL_TIME_S
 IDLE_TIME_BEFORE_EVOLUTION_SEC = max(10, _safe_int_env('OUROBOROS_IDLE_TIME_BEFORE_EVOLUTION_SEC', 30))
 # Enable idle-time evolution (auto-spawn small evolution tasks when idle)
 IDLE_EVOLUTION_ENABLED = _safe_int_env('OUROBOROS_IDLE_EVOLUTION_ENABLED', 1) == 1
+IDLE_EVOLUTION_MIN_INTERVAL_SEC = max(300, _safe_int_env('OUROBOROS_IDLE_EVOLUTION_MIN_INTERVAL_SEC', 1800))
 
 BRANCH_DEV = str(os.environ.get('OUROBOROS_BRANCH_DEV', 'ouroboros') or 'ouroboros').strip()
 BRANCH_STABLE = str(os.environ.get('OUROBOROS_BRANCH_STABLE', 'ouroboros-stable') or 'ouroboros-stable').strip()
@@ -216,6 +217,12 @@ def _handle_fast_command(chat_id: int, text: str) -> bool:
 
     if cmd in ('/evolve on', '/evolve start'):
         _set_evolution_mode(True)
+        # Try enqueueing one immediate evolution task so manual start feels responsive.
+        # It still respects idle checks and dead-loop guards in queue.py.
+        try:
+            sup_queue.enqueue_evolution_task_if_needed(idle_check=True)
+        except Exception:
+            log.debug('Suppressed exception while enqueuing immediate evolution task', exc_info=True)
         send_with_budget(chat_id, '?? Evolution: ON')
         return True
 
@@ -411,7 +418,15 @@ def main() -> None:
     log.info('?? VPS launcher started: workers=%d, poll_timeout=%ds, discord=%s', MAX_WORKERS, POLL_TIMEOUT, 'enabled' if discord_enabled else 'disabled')
     last_heartbeat = 0.0
     idle_start_time = None  # Track when queue became idle
-    last_evolution_trigger_time = 0.0  # Track last evolution trigger
+    # Track last evolution trigger; initialize from persisted state to avoid
+    # rapid re-trigger loops immediately after restart.
+    last_evolution_trigger_time = 0.0
+    try:
+        last_evo_iso = str(st.get('last_evolution_task_at') or '').strip()
+        if last_evo_iso:
+            last_evolution_trigger_time = datetime.datetime.fromisoformat(last_evo_iso).timestamp()
+    except Exception:
+        last_evolution_trigger_time = 0.0
 
     while True:
         try:
@@ -472,7 +487,7 @@ def main() -> None:
                     idle_duration = now - idle_start_time
                     # Trigger evolution if idle for enough time and not recently triggered
                     if (idle_duration >= IDLE_TIME_BEFORE_EVOLUTION_SEC and
-                        now - last_evolution_trigger_time >= 300):  # At least 5 min between evolution
+                        now - last_evolution_trigger_time >= IDLE_EVOLUTION_MIN_INTERVAL_SEC):
                         sup_queue.enqueue_evolution_task_if_needed(idle_check=True)
                         last_evolution_trigger_time = now
                         idle_start_time = None  # Reset idle timer after triggering
