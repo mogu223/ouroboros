@@ -459,7 +459,7 @@ class OuroborosAgent:
             )
         except Exception as e:
             log.exception("Task failed with exception")
-            final_text = f"?? SYSTEM_ERROR: {type(e).__name__}: {e}"
+            final_text = f"SYSTEM_ERROR: {type(e).__name__}: {e}"
             usage = {}
             llm_trace = {"error": repr(e)}
 

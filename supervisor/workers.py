@@ -307,7 +307,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
                     out_q.put({
                         "type": "send_message",
                         "chat_id": int(chat_id),
-                        "text": f"?? SYSTEM_ERROR: {type(_e).__name__}: {_e}",
+                        "text": f"SYSTEM_ERROR: {type(_e).__name__}: {_e}",
                         "format": "markdown",
                         "is_progress": False,
                         "worker_id": wid,
