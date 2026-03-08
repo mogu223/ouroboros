@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -49,6 +50,24 @@ class TelegramClient:
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}"
         self._token = token
+        self._last_conflict_ts = 0.0
+        self._last_webhook_reset_ts = 0.0
+
+    def _resolve_getupdates_conflict(self) -> None:
+        now = time.time()
+        self._last_conflict_ts = now
+        # Throttle webhook reset attempts to avoid API hammering.
+        if (now - self._last_webhook_reset_ts) < 60:
+            return
+        self._last_webhook_reset_ts = now
+        try:
+            requests.post(
+                f"{self.base}/deleteWebhook",
+                data={"drop_pending_updates": False},
+                timeout=10,
+            )
+        except Exception:
+            log.debug("Failed to deleteWebhook while resolving getUpdates 409", exc_info=True)
 
     def get_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         last_err = "unknown"
@@ -65,10 +84,22 @@ class TelegramClient:
                 if data.get("ok") is not True:
                     raise RuntimeError(f"Telegram getUpdates failed: {data}")
                 return data.get("result") or []
+            except requests.exceptions.HTTPError as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status == 409:
+                    # Another poller/webhook is active; self-heal and retry silently.
+                    self._resolve_getupdates_conflict()
+                    last_err = repr(e)
+                    if attempt < 2:
+                        time.sleep(0.8 * (attempt + 1))
+                        continue
+                    return []
+                last_err = repr(e)
+                if attempt < 2:
+                    time.sleep(0.8 * (attempt + 1))
             except Exception as e:
                 last_err = repr(e)
                 if attempt < 2:
-                    import time
                     time.sleep(0.8 * (attempt + 1))
         raise RuntimeError(f"Telegram getUpdates failed after retries: {last_err}")
 

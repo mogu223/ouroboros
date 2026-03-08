@@ -287,6 +287,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     except Exception as _e:
         _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
         return
+    task = None
     while True:
         try:
             task = in_q.get()
@@ -299,6 +300,30 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
                 out_q.put(e2)
         except Exception as _e:
             _log_worker_crash(wid, _drive, "handle_task", _e, _tb.format_exc())
+            try:
+                failed_task = task if isinstance(task, dict) else {}
+                chat_id = failed_task.get("chat_id")
+                if chat_id is not None:
+                    out_q.put({
+                        "type": "send_message",
+                        "chat_id": int(chat_id),
+                        "text": f"?? SYSTEM_ERROR: {type(_e).__name__}: {_e}",
+                        "format": "markdown",
+                        "is_progress": False,
+                        "worker_id": wid,
+                    })
+                if failed_task.get("id"):
+                    out_q.put({
+                        "type": "task_done",
+                        "task_id": str(failed_task.get("id")),
+                        "task_type": str(failed_task.get("type") or "task"),
+                        "cost_usd": 0.0,
+                        "total_rounds": 0,
+                        "duration_sec": 0.0,
+                        "worker_id": wid,
+                    })
+            except Exception:
+                log.debug("Suppressed exception", exc_info=True)
 
 
 def _log_worker_crash(wid: int, drive_root: pathlib.Path, phase: str, exc: Exception, tb: str) -> None:

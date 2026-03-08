@@ -387,25 +387,27 @@ class OuroborosAgent:
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
+            pending_events=self._pending_events,
+            current_chat_id=self._current_chat_id,
+            current_task_type=self._current_task_type,
+            event_queue=self._event_queue,
+            task_id=str(task.get("id") or ""),
+            task_depth=int(task.get("depth", 0) or 0),
+            is_direct_chat=bool(task.get("_is_direct_chat")),
         )
         self.tools.set_context(ctx)
 
         # Build messages with full context
-        messages = build_llm_messages(
-            task=task,
+        messages, cap_info = build_llm_messages(
+            env=self.env,
             memory=self.memory,
-            tools=self.tools,
-            repo_dir=self.env.repo_dir,
-            drive_root=self.env.drive_root,
+            task=task,
         )
-
-        # Get capability info for loop
-        cap_info = self.tools.get_capability_info()
 
         return ctx, messages, cap_info
 
-    def run_task(self, task: Dict[str, Any], send_progress_message=None) -> Dict[str, Any]:
-        """Run a single task (dict with 'id', 'type', 'content')."""
+    def run_task(self, task: Dict[str, Any], send_progress_message=None) -> List[Dict[str, Any]]:
+        """Run a single task and return supervisor event list."""
         self._busy = True
         self._task_started_ts = time.time()
         self._last_progress_ts = 0.0
@@ -413,23 +415,32 @@ class OuroborosAgent:
         task_type = task.get("type", "task")
         self._current_task_type = task_type
 
-        # Track chat_id for this task
         chat_id = task.get("chat_id")
         if chat_id:
             self._current_chat_id = chat_id
 
         drive_logs = self.env.drive_path("logs")
+        started_at = time.time()
+        final_text = ""
+        usage: Dict[str, Any] = {}
+        llm_trace: Dict[str, Any] = {}
 
-        # Prepare context and messages
-        ctx, messages, cap_info = self._prepare_task_context(task)
-
-        # Emit initial progress
-        emit_progress = send_progress_message or (lambda _text: None)
-        emit_progress("思考中...")
-
-        # Run LLM tool loop
         try:
-            result = run_llm_tool_loop(
+            _ctx, messages, _cap_info = self._prepare_task_context(task)
+
+            emit_progress = send_progress_message or (lambda _text: None)
+            emit_progress("Thinking...")
+
+            is_direct_chat = bool(task.get("_is_direct_chat"))
+            max_retries_cfg = int(self.memory.get_config("llm_max_retries", default=8) or 8)
+            max_iterations_cfg = int(self.memory.get_config("task_max_iterations", default=80) or 80)
+            max_wall_time_cfg = float(self.memory.get_config("task_max_wall_time_sec", default=900) or 900)
+            if is_direct_chat:
+                max_retries_cfg = int(self.memory.get_config("direct_llm_max_retries", default=3) or 3)
+                max_iterations_cfg = int(self.memory.get_config("direct_max_iterations", default=8) or 8)
+                max_wall_time_cfg = float(self.memory.get_config("direct_max_wall_time_sec", default=45) or 45)
+
+            final_text, usage, llm_trace = run_llm_tool_loop(
                 llm=self.llm,
                 tools=self.tools,
                 drive_logs=drive_logs,
@@ -437,9 +448,9 @@ class OuroborosAgent:
                 messages=messages,
                 active_model=task.get("model"),
                 active_effort=task.get("effort", "medium"),
-                max_iterations=task.get("max_iterations", 200),
-                max_wall_time_sec=task.get("max_wall_time_sec", 0),
-                max_retries=task.get("max_retries", 8),
+                max_iterations=task.get("max_iterations", max_iterations_cfg),
+                max_wall_time_sec=task.get("max_wall_time_sec", max_wall_time_cfg),
+                max_retries=task.get("max_retries", max_retries_cfg),
                 budget_remaining_usd=task.get("budget_remaining_usd"),
                 event_queue=self._event_queue,
                 task_type=task_type,
@@ -448,15 +459,53 @@ class OuroborosAgent:
             )
         except Exception as e:
             log.exception("Task failed with exception")
-            result = {
-                "task_id": task_id,
-                "status": "error",
-                "error": f"{type(e).__name__}: {e}",
-                "traceback": traceback.format_exc(),
-            }
+            final_text = f"?? SYSTEM_ERROR: {type(e).__name__}: {e}"
+            usage = {}
+            llm_trace = {"error": repr(e)}
+
+        if not usage and isinstance(llm_trace, dict) and isinstance(llm_trace.get("usage"), dict):
+            usage = dict(llm_trace.get("usage") or {})
+
+        events: List[Dict[str, Any]] = []
+        try:
+            chat_id_int = int(chat_id) if chat_id is not None else 0
+        except Exception:
+            chat_id_int = 0
+
+        if chat_id_int and str(final_text or "").strip():
+            events.append({
+                "ts": utc_now_iso(),
+                "type": "send_message",
+                "chat_id": chat_id_int,
+                "text": str(final_text),
+                "format": "markdown",
+                "is_progress": False,
+            })
+
+        if isinstance(usage, dict) and usage:
+            events.append({
+                "ts": utc_now_iso(),
+                "type": "llm_usage",
+                "task_id": str(task_id),
+                "category": str(task_type or "task"),
+                "model": str((llm_trace or {}).get("model_used") or task.get("model") or ""),
+                "usage": usage,
+            })
+
+        events.append({
+            "ts": utc_now_iso(),
+            "type": "task_done",
+            "task_id": str(task_id),
+            "task_type": str(task_type or "task"),
+            "cost_usd": float((usage or {}).get("cost") or 0.0),
+            "total_rounds": int((usage or {}).get("rounds") or 0),
+            "duration_sec": round(time.time() - started_at, 3),
+        })
 
         self._busy = False
-        return result
+        self._current_chat_id = None
+        self._current_task_type = None
+        return events
 
     def is_busy(self) -> bool:
         return self._busy
