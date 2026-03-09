@@ -1,4 +1,4 @@
-"""
+﻿"""
 Ouroboros context builder.
 
 Assembles LLM context from prompts, memory, logs, and runtime state.
@@ -157,12 +157,15 @@ def _build_discord_playbook_section(env: Any, task: Dict[str, Any]) -> str:
 
 
 def _build_memory_sections(memory: Memory) -> List[str]:
-    """Build scratchpad, identity, dialogue summary sections."""
+    """Build scratchpad, identity, dialogue summary, and journal sections."""
     sections = []
 
     scratchpad_cap = _safe_int_env('OUROBOROS_SCRATCHPAD_MAX_CHARS', 20000, 2000, 120000)
     identity_cap = _safe_int_env('OUROBOROS_IDENTITY_MAX_CHARS', 20000, 2000, 120000)
     summary_cap = _safe_int_env('OUROBOROS_DIALOGUE_SUMMARY_MAX_CHARS', 12000, 1000, 60000)
+    journal_window = _safe_int_env('OUROBOROS_JOURNAL_CONTEXT_WINDOW', 12, 1, 60)
+    journal_cap = _safe_int_env('OUROBOROS_JOURNAL_MAX_CHARS', 4000, 400, 20000)
+    journal_preview_chars = _safe_int_env('OUROBOROS_JOURNAL_PREVIEW_CHARS', 240, 80, 1200)
 
     scratchpad_raw = memory.load_scratchpad()
     sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, scratchpad_cap))
@@ -170,24 +173,84 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, identity_cap))
 
-    # Dialogue summary (key moments from chat history)
     summary_path = memory.drive_root / "memory" / "dialogue_summary.md"
     if summary_path.exists():
         summary_text = read_text(summary_path)
         if summary_text.strip():
             sections.append("## Dialogue Summary\n\n" + clip_text(summary_text, summary_cap))
 
+    journal_entries = memory.read_journal_tail(journal_window)
+    journal_summary = memory.summarize_journal(
+        journal_entries,
+        limit=journal_window,
+        preview_chars=journal_preview_chars,
+    )
+    if journal_summary:
+        sections.append("## Scratchpad Journal\n\n" + clip_text(journal_summary, journal_cap))
+
     return sections
 
-
-def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[str]:
-    """Build recent chat, recent progress, recent tools, recent events sections."""
+def _build_recent_sections(memory: Memory, env: Any, task: Optional[Dict[str, Any]] = None, task_id: str = "") -> List[str]:
+    """Build recent owner messages, recent chat, progress, tools, and events sections."""
     sections = []
+    task = task or {}
 
     recent_window = _safe_int_env('OUROBOROS_CONTEXT_RECENT_WINDOW', 80, 20, 300)
+    owner_window = _safe_int_env('OUROBOROS_CONTEXT_OWNER_WINDOW', 12, 4, 60)
+    outgoing_max_chars = _safe_int_env('OUROBOROS_CONTEXT_ASSISTANT_MAX_CHARS', 280, 80, 1200)
+    chat_scan_window = max(recent_window * 4, owner_window * 8, 240)
+
+    source_platform = str(task.get("source_platform") or "").strip().lower()
+    if source_platform not in ("telegram", "discord"):
+        try:
+            source_platform = "discord" if int(task.get("chat_id")) < -1000000000000 else "telegram"
+        except Exception:
+            source_platform = ""
+
+    chat_entries = memory.read_jsonl_tail("chat.jsonl", chat_scan_window)
+    scoped_chat_entries = memory.filter_chat_entries(
+        chat_entries,
+        chat_id=task.get("chat_id"),
+        source_platform=source_platform,
+    )
+    owner_entries = memory.filter_chat_entries(
+        scoped_chat_entries,
+        direction="in",
+    )
+    if not owner_entries:
+        fallback_owner_entries = []
+        for evt in memory.read_jsonl_tail("events.jsonl", chat_scan_window):
+            if evt.get("type") != "task_received":
+                continue
+            task_payload = evt.get("task") or {}
+            if str(task_payload.get("chat_id") or "") != str(task.get("chat_id") or ""):
+                continue
+            payload_platform = str(task_payload.get("source_platform") or "").strip().lower()
+            if source_platform and payload_platform and payload_platform != source_platform:
+                continue
+            if not bool(task_payload.get("_is_direct_chat")):
+                continue
+            payload_text = str(task_payload.get("text") or "").strip()
+            if not payload_text:
+                continue
+            fallback_owner_entries.append({
+                "ts": str(evt.get("ts") or ""),
+                "text": payload_text,
+                "chat_id": task_payload.get("chat_id"),
+                "direction": "in",
+                "source_platform": payload_platform or source_platform,
+            })
+        owner_entries = fallback_owner_entries
+
+    owner_summary = memory.summarize_owner_messages(owner_entries, limit=owner_window)
+    if owner_summary:
+        sections.append("## Recent owner messages\n\n" + owner_summary)
 
     chat_summary = memory.summarize_chat(
-        memory.read_jsonl_tail("chat.jsonl", recent_window))
+        scoped_chat_entries or chat_entries,
+        limit=recent_window,
+        outgoing_max_chars=outgoing_max_chars,
+    )
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
@@ -218,7 +281,6 @@ def _build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[
         sections.append("## Supervisor\n\n" + supervisor_summary)
 
     return sections
-
 
 def _build_health_invariants(env: Any) -> str:
     """Build health invariants section for LLM-first self-detection.
@@ -436,7 +498,7 @@ def build_llm_messages(
     if health_section:
         dynamic_parts.append(health_section)
 
-    dynamic_parts.extend(_build_recent_sections(memory, env, task_id=task.get("id", "")))
+    dynamic_parts.extend(_build_recent_sections(memory, env, task=task, task_id=task.get("id", "")))
 
     if str(task.get("type") or "") == "review" and review_context_builder is not None:
         try:
@@ -854,4 +916,6 @@ def _safe_read(path: pathlib.Path, fallback: str = "") -> str:
         log.debug(f"Failed to read file {path} in _safe_read", exc_info=True)
         pass
     return fallback
+
+
 

@@ -45,7 +45,7 @@ from supervisor import queue as sup_queue
 from supervisor import workers as sup_workers
 from supervisor import git_ops as sup_git
 from supervisor.state import load_state, save_state, append_jsonl
-from supervisor.telegram import TelegramClient, init as telegram_init, send_with_budget
+from supervisor.telegram import TelegramClient, init as telegram_init, send_with_budget, log_chat
 from supervisor.events import dispatch_event
 from supervisor.queue import _queue_lock
 from supervisor.launcher_discord import init_discord_bridge
@@ -272,6 +272,7 @@ def _build_task_from_update(update: Dict[str, Any], tg: TelegramClient) -> Optio
         'id': uuid.uuid4().hex[:8],
         'type': 'task',
         'chat_id': int(chat_id),
+        'user_id': int((msg.get('from') or {}).get('id') or chat_id),
         'text': text,
         '_is_direct_chat': True,
         'source_platform': 'telegram',
@@ -473,6 +474,8 @@ def _process_telegram_updates(
         chat_id = int(task['chat_id'])
         if not _ensure_owner(chat_id, tg):
             continue
+
+        log_chat("in", chat_id, int(task.get('user_id') or chat_id), str(task.get('text') or ''))
 
         if _handle_fast_command(chat_id, str(task.get('text') or '')):
             continue

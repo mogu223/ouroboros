@@ -1,4 +1,4 @@
-"""
+﻿"""
 Ouroboros — Memory.
 
 Scratchpad, identity, chat history.
@@ -166,25 +166,153 @@ class Memory:
             log.warning(f"Failed to read JSONL tail from {log_name}", exc_info=True)
             return []
 
+    def read_journal_tail(self, max_entries: int = 30) -> List[Dict[str, Any]]:
+        """Read the last max_entries records from scratchpad journal."""
+        path = self.journal_path()
+        if not path.exists():
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8").strip().split("\n")
+            tail = lines[-max_entries:] if max_entries < len(lines) else lines
+            entries = []
+            for line in tail:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    log.debug(f"Failed to parse JSON line in read_journal_tail: {line[:100]}", exc_info=True)
+                    continue
+            return entries
+        except Exception:
+            log.warning("Failed to read scratchpad journal tail", exc_info=True)
+            return []
+
+    def filter_chat_entries(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        chat_id: Optional[Any] = None,
+        source_platform: str = "",
+        direction: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Filter chat entries by chat, platform, and direction."""
+        filtered = entries
+
+        if chat_id is not None:
+            chat_id_str = str(chat_id)
+            filtered = [e for e in filtered if str(e.get("chat_id")) == chat_id_str]
+
+        source_platform = str(source_platform or "").strip().lower()
+        if source_platform:
+            filtered = [
+                e for e in filtered
+                if not str(e.get("source_platform") or "").strip()
+                or str(e.get("source_platform") or "").strip().lower() == source_platform
+            ]
+
+        direction = str(direction or "").strip().lower()
+        if direction:
+            filtered = [
+                e for e in filtered
+                if str(e.get("direction") or "").strip().lower() == direction
+            ]
+
+        return filtered
+
+    def _collapse_repeated_lines(self, items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Collapse consecutive duplicate chat/journal lines."""
+        collapsed: List[Dict[str, str]] = []
+        for item in items:
+            signature = (
+                item.get("speaker", ""),
+                item.get("text", ""),
+                item.get("chat_id", ""),
+            )
+            if collapsed and collapsed[-1].get("signature") == signature:
+                collapsed[-1]["count"] = str(int(collapsed[-1].get("count", "1")) + 1)
+                collapsed[-1]["ts"] = item.get("ts", collapsed[-1].get("ts", ""))
+                continue
+            collapsed.append({
+                "signature": signature,
+                "speaker": item.get("speaker", ""),
+                "text": item.get("text", ""),
+                "ts": item.get("ts", ""),
+                "chat_id": item.get("chat_id", ""),
+                "count": "1",
+            })
+        return collapsed
+
     # --- Log summarization ---
 
-    def summarize_chat(self, entries: List[Dict[str, Any]]) -> str:
+    def summarize_chat(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        limit: int = 100,
+        outgoing_max_chars: int = 280,
+    ) -> str:
         if not entries:
             return ""
-        lines = []
-        for e in entries[-100:]:
+
+        prepared = []
+        for e in entries[-limit:]:
             dir_raw = str(e.get("direction", "")).lower()
-            direction = "→" if dir_raw in ("out", "outgoing") else "←"
-            ts_full = e.get("ts", "")
+            ts_full = str(e.get("ts", ""))
             ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
-            # Creator messages: no truncation (most valuable context)
-            # Outgoing messages: truncate to 800 chars
             raw_text = str(e.get("text", ""))
+            if not raw_text.strip():
+                continue
             if dir_raw in ("out", "outgoing"):
-                text = short(raw_text, 800)
+                speaker = "ASSISTANT"
+                text_line = short(raw_text, outgoing_max_chars)
             else:
-                text = raw_text  # never truncate creator's messages
-            lines.append(f"{direction} {ts_hhmm} {text}")
+                speaker = "OWNER"
+                text_line = raw_text
+            prepared.append({
+                "speaker": speaker,
+                "text": text_line,
+                "ts": ts_hhmm,
+                "chat_id": str(e.get("chat_id", "")),
+            })
+
+        lines = []
+        for item in self._collapse_repeated_lines(prepared):
+            repeat = int(item.get("count", "1"))
+            suffix = f" (x{repeat})" if repeat > 1 else ""
+            lines.append(f"{item['speaker']} {item['ts']} {item['text']}{suffix}")
+        return "\n".join(lines)
+
+    def summarize_owner_messages(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        limit: int = 12,
+    ) -> str:
+        """Summarize only recent owner messages with no truncation."""
+        if not entries:
+            return ""
+
+        prepared = []
+        for e in entries[-limit:]:
+            text_line = str(e.get("text", "")).strip()
+            if not text_line:
+                continue
+            ts_full = str(e.get("ts", ""))
+            ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
+            prepared.append({
+                "speaker": "OWNER",
+                "text": text_line,
+                "ts": ts_hhmm,
+                "chat_id": str(e.get("chat_id", "")),
+            })
+
+        lines = []
+        for item in self._collapse_repeated_lines(prepared):
+            repeat = int(item.get("count", "1"))
+            suffix = f" (x{repeat})" if repeat > 1 else ""
+            lines.append(f"{item['ts']} {item['text']}{suffix}")
         return "\n".join(lines)
 
     def summarize_progress(self, entries: List[Dict[str, Any]], limit: int = 15) -> str:
@@ -245,6 +373,44 @@ class Memory:
                 return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
         return ""
 
+    def summarize_journal(
+        self,
+        entries: List[Dict[str, Any]],
+        *,
+        limit: int = 12,
+        preview_chars: int = 240,
+    ) -> str:
+        """Summarize recent journal entries so they can flow back into context."""
+        if not entries:
+            return ""
+
+        prepared = []
+        for e in entries[-limit:]:
+            preview = str(
+                e.get("summary")
+                or e.get("content_preview")
+                or e.get("text")
+                or ""
+            ).strip()
+            if not preview:
+                continue
+            preview = " ".join(preview.split())
+            ts_full = str(e.get("ts", ""))
+            ts_hhmm = ts_full[11:16] if len(ts_full) >= 16 else ""
+            prepared.append({
+                "speaker": "JOURNAL",
+                "text": short(preview, preview_chars),
+                "ts": ts_hhmm,
+                "chat_id": "",
+            })
+
+        lines = []
+        for item in self._collapse_repeated_lines(prepared):
+            repeat = int(item.get("count", "1"))
+            suffix = f" (x{repeat})" if repeat > 1 else ""
+            lines.append(f"- {item['ts']} {item['text']}{suffix}")
+        return "\n".join(lines)
+
     def append_journal(self, entry: Dict[str, Any]) -> None:
         append_jsonl(self.journal_path(), entry)
 
@@ -262,3 +428,6 @@ class Memory:
             "This file is read at every dialogue and influences my responses.\n"
             "I update it when I feel the need, via drive_write.\n"
         )
+
+
+
